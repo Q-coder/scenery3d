@@ -3,6 +3,7 @@
 
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/classes/image.hpp>
+#include <godot_cpp/templates/hash_map.hpp>
 
 namespace godot
 {
@@ -14,6 +15,19 @@ namespace godot
 	{
 		GDCLASS(S3DElevationDB, RefCounted);
 
+	public:
+		struct TileData {
+			Ref<Image> heightmap;
+			int width;
+			int height;
+		};
+
+	private:
+		HashMap<uint64_t, TileData> tiles;
+		int tile_size = 1024;
+
+		static uint64_t _tile_key(int tile_x, int tile_z);
+
 	protected:
 		static void _bind_methods();
 
@@ -21,13 +35,15 @@ namespace godot
 		S3DElevationDB();
 		~S3DElevationDB();
 
-		// Query the terrain elevation at world coordinates (x, z).
-		// Returns the bilinear-interpolated height, or 0.0 if no tile is loaded
-		// for that location.
-		double get_elevation(double x, double z) const;
+		void set_tile_size(int p_size);
+		int get_tile_size() const;
 
-		// Register a heightmap image for the tile at grid coordinates (tile_x, tile_z).
 		void load_tile(int tile_x, int tile_z, Ref<Image> heightmap);
+		void unload_tile(int tile_x, int tile_z);
+		bool has_tile(int tile_x, int tile_z) const;
+
+		double get_elevation(double x, double z) const;
+		double get_elevation_safe(double x, double z, double default_val) const;
 	};
 
 }
