@@ -31,15 +31,27 @@ Tile size: 1024m x 1024m, aligned to Swiss LV95 coordinate grid.
 
 Requires the godot-cpp submodule (included) and SCons.
 
+The extension must be built with `precision=double` and the API dump from the
+double-precision Godot editor (included in `gdextension/extension_api.double.json`):
+
 ```bash
 # macOS (Apple Silicon, debug)
-scons platform=macos target=template_debug arch=arm64
+scons platform=macos target=template_debug arch=arm64 precision=double \
+  custom_api_file=gdextension/extension_api.double.json
 
 # macOS (release)
-scons platform=macos target=template_release arch=arm64
+scons platform=macos target=template_release arch=arm64 precision=double \
+  custom_api_file=gdextension/extension_api.double.json
 ```
 
-Output: `demo/bin/libscenery3d.macos.template_{debug,release}.arm64.dylib`
+Output: `demo/bin/libscenery3d.macos.template_{debug,release}.double.arm64.dylib`
+
+To regenerate the API dump from a new Godot build:
+
+```bash
+godot.macos.editor.double.arm64 --headless --dump-extension-api
+cp extension_api.json gdextension/extension_api.double.json
+```
 
 ## Godot Engine Fork
 

@@ -1,0 +1,14 @@
+[gd_scene load_steps=1 format=3]
+
+[node name="Main" type="Node3D"]
+
+[node name="Scenery3D" type="Scenery3D" parent="."]
+tile_size = 1024
+load_radius = 8
+data_path = ""
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.866025, 0.5, 0, -0.5, 0.866025, 0, 500, 1000)
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.866025, 0.5, 0, -0.5, 0.866025, 0, 100, 0)
