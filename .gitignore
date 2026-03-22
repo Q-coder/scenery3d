@@ -1,0 +1,21 @@
+# Build artifacts
+demo/bin/*.dylib
+demo/bin/*.dll
+demo/bin/*.so
+demo/bin/*.a
+demo/bin/*.lib
+
+# SCons
+.sconsign.dblite
+*.o
+*.os
+
+# godot-cpp build artifacts
+godot-cpp/bin/
+godot-cpp/gen/
+
+# macOS
+.DS_Store
+
+# Godot
+.godot/
