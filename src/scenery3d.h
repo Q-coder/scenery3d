@@ -10,6 +10,7 @@ namespace godot
 {
 
 	class S3DTileManager;
+	class S3DBuildingManager;
 
 	// Main entry point for the terrain system.
 	// Owns the tile manager and elevation database, and coordinates
@@ -25,8 +26,10 @@ namespace godot
 		double origin_east = 2600000.0;
 		double origin_north = 1200000.0;
 		String data_path;
+		String buildings_path;
 
 		S3DTileManager *tile_manager = nullptr;
+		S3DBuildingManager *building_manager = nullptr;
 		Ref<S3DElevationDB> elevation_db;
 		Ref<S3DCoords> coords;
 
@@ -65,6 +68,14 @@ namespace godot
 
 		void set_data_path(const String &p_path);
 		String get_data_path() const;
+
+		void set_buildings_path(const String &p_path);
+		String get_buildings_path() const;
+
+		// Building visibility control.
+		void hide_building(const String &uuid);
+		void show_building(const String &uuid);
+		bool is_building_hidden(const String &uuid) const;
 	};
 
 }

@@ -1,7 +1,9 @@
 #include "scenery3d.h"
 #include "s3d_tile_manager.h"
+#include "s3d_building_manager.h"
 
 #include <godot_cpp/core/class_db.hpp>
+#include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
 using namespace godot;
@@ -45,10 +47,29 @@ void Scenery3D::_bind_methods()
 	ClassDB::bind_method(D_METHOD("set_data_path", "path"), &Scenery3D::set_data_path);
 	ClassDB::bind_method(D_METHOD("get_data_path"), &Scenery3D::get_data_path);
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "data_path"), "set_data_path", "get_data_path");
+
+	ClassDB::bind_method(D_METHOD("set_buildings_path", "path"), &Scenery3D::set_buildings_path);
+	ClassDB::bind_method(D_METHOD("get_buildings_path"), &Scenery3D::get_buildings_path);
+	ADD_PROPERTY(PropertyInfo(Variant::STRING, "buildings_path"), "set_buildings_path", "get_buildings_path");
+
+	ClassDB::bind_method(D_METHOD("hide_building", "uuid"), &Scenery3D::hide_building);
+	ClassDB::bind_method(D_METHOD("show_building", "uuid"), &Scenery3D::show_building);
+	ClassDB::bind_method(D_METHOD("is_building_hidden", "uuid"), &Scenery3D::is_building_hidden);
 }
 
 void Scenery3D::_ready()
 {
+	// Resolve data_path: use project setting "scenery3d/data_path" as fallback.
+	if (data_path.is_empty()) {
+		ProjectSettings *ps = ProjectSettings::get_singleton();
+		if (ps && ps->has_setting("scenery3d/data_path")) {
+			data_path = ps->get_setting("scenery3d/data_path");
+		}
+	}
+	if (data_path.is_empty()) {
+		UtilityFunctions::push_warning("Scenery3D: data_path is not set. Set it in the inspector or via project setting 'scenery3d/data_path'.");
+	}
+
 	// Create and configure the tile manager.
 	tile_manager = memnew(S3DTileManager);
 	add_child(tile_manager);
@@ -70,6 +91,28 @@ void Scenery3D::_ready()
 	coords.instantiate();
 	coords->set_origin_east(origin_east);
 	coords->set_origin_north(origin_north);
+
+	// Create the building manager.
+	if (!buildings_path.is_empty()) {
+		building_manager = memnew(S3DBuildingManager);
+		add_child(building_manager);
+		building_manager->set_buildings_path(buildings_path);
+		building_manager->set_origin_east(origin_east);
+		building_manager->set_origin_north(origin_north);
+	} else {
+		// Try project setting fallback.
+		ProjectSettings *ps = ProjectSettings::get_singleton();
+		if (ps && ps->has_setting("scenery3d/buildings_path")) {
+			buildings_path = ps->get_setting("scenery3d/buildings_path");
+			if (!buildings_path.is_empty()) {
+				building_manager = memnew(S3DBuildingManager);
+				add_child(building_manager);
+				building_manager->set_buildings_path(buildings_path);
+				building_manager->set_origin_east(origin_east);
+				building_manager->set_origin_north(origin_north);
+			}
+		}
+	}
 }
 
 void Scenery3D::_process(double delta)
@@ -145,6 +188,41 @@ void Scenery3D::set_data_path(const String &p_path)
 String Scenery3D::get_data_path() const
 {
 	return data_path;
+}
+
+void Scenery3D::set_buildings_path(const String &p_path)
+{
+	buildings_path = p_path;
+	if (building_manager) {
+		building_manager->set_buildings_path(p_path);
+	}
+}
+
+String Scenery3D::get_buildings_path() const
+{
+	return buildings_path;
+}
+
+void Scenery3D::hide_building(const String &uuid)
+{
+	if (building_manager) {
+		building_manager->hide_building(uuid);
+	}
+}
+
+void Scenery3D::show_building(const String &uuid)
+{
+	if (building_manager) {
+		building_manager->show_building(uuid);
+	}
+}
+
+bool Scenery3D::is_building_hidden(const String &uuid) const
+{
+	if (building_manager) {
+		return building_manager->is_building_hidden(uuid);
+	}
+	return false;
 }
 
 void Scenery3D::set_origin_east(double p_east)

@@ -13,3 +13,13 @@ config_version=5
 config/name="Scenery3D Demo"
 run/main_scene="res://main.tscn"
 config/features=PackedStringArray("4.6", "Double Precision")
+
+[display]
+
+window/size/viewport_width=2800
+window/size/viewport_height=1600
+
+[scenery3d]
+
+data_path="/Users/gery/code/provpilot/scenery/terrain"
+buildings_path="/tmp/scenery3d_buildings"
