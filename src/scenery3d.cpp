@@ -30,6 +30,10 @@ void Scenery3D::_bind_methods()
 	ClassDB::bind_method(D_METHOD("get_load_radius"), &Scenery3D::get_load_radius);
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "load_radius"), "set_load_radius", "get_load_radius");
 
+	ClassDB::bind_method(D_METHOD("set_far_radius", "radius"), &Scenery3D::set_far_radius);
+	ClassDB::bind_method(D_METHOD("get_far_radius"), &Scenery3D::get_far_radius);
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "far_radius"), "set_far_radius", "get_far_radius");
+
 	ClassDB::bind_method(D_METHOD("set_origin_east", "east"), &Scenery3D::set_origin_east);
 	ClassDB::bind_method(D_METHOD("get_origin_east"), &Scenery3D::get_origin_east);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "origin_east"), "set_origin_east", "get_origin_east");
@@ -50,6 +54,7 @@ void Scenery3D::_ready()
 	add_child(tile_manager);
 	tile_manager->set_tile_size(tile_size);
 	tile_manager->set_load_radius(load_radius);
+	tile_manager->set_far_radius(far_radius);
 	tile_manager->set_data_path(data_path);
 	tile_manager->set_origin_east(origin_east);
 	tile_manager->set_origin_north(origin_north);
@@ -114,6 +119,19 @@ void Scenery3D::set_load_radius(int p_radius)
 int Scenery3D::get_load_radius() const
 {
 	return load_radius;
+}
+
+void Scenery3D::set_far_radius(int p_radius)
+{
+	far_radius = p_radius;
+	if (tile_manager) {
+		tile_manager->set_far_radius(p_radius);
+	}
+}
+
+int Scenery3D::get_far_radius() const
+{
+	return far_radius;
 }
 
 void Scenery3D::set_data_path(const String &p_path)

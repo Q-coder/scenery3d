@@ -3,7 +3,7 @@ extends Camera3D
 ## Simple fly camera for terrain preview.
 ## WASD to move, mouse drag to look, scroll to change speed.
 
-@export var move_speed: float = 200.0
+@export var move_speed: float = 500.0
 @export var look_sensitivity: float = 0.002
 @export var speed_step: float = 50.0
 
@@ -21,9 +21,9 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
-			move_speed = max(10.0, move_speed + speed_step)
+			move_speed = max(1000.0, move_speed + speed_step)
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			move_speed = max(10.0, move_speed - speed_step)
+			move_speed = max(1000.0, move_speed - speed_step)
 
 	if event is InputEventKey and event.pressed:
 		if event.keycode == KEY_ESCAPE:

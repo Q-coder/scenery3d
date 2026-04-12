@@ -7,6 +7,8 @@ Scenery3D replaces Terrain3D for flight simulation use cases, solving the key ar
 - **Double-precision Godot** — designed to run on a Godot fork with `precision = "double"`, eliminating the need for floating-origin rebasing entirely
 - **Async tile streaming** — all terrain I/O happens on background threads (4-thread pool); the main thread only does budgeted mesh generation
 - **Distance-based LOD** — tiles get progressively coarser with distance, enabling 50km+ visibility with manageable vertex counts
+- **Far terrain chunks** — beyond the individual tile radius, 8×8 tile groups are composited into low-res meshes for 200km+ visibility (Alps panorama)
+- **Seamless handoffs** — chunks and tiles overlap during loading; nothing is removed until its replacement is fully loaded
 - **Per-tile independence** — tiles are added and removed individually, with no global rebuild step
 - **O(1) elevation queries** — bilinear interpolation over loaded heightmaps, shared between rendering and flight dynamics
 
@@ -33,6 +35,17 @@ Tiles are assigned LOD levels based on Chebyshev distance from the camera tile:
 
 Vertex budget: 200K vertices/frame to prevent stalls. Distant tiles discard their
 heightmap after meshing to save memory.
+
+### Far Terrain Chunks
+
+Beyond `load_radius`, terrain is rendered as low-resolution chunks. Each chunk
+composites an 8×8 group of tiles into a single 33×33 vertex mesh, covering
+8192×8192 meters. This extends visibility to `far_radius` (default 200 tiles = 200km).
+
+Chunk lifecycle uses seamless handoffs:
+- A chunk is only removed when ALL individual tiles covering it are fully loaded
+- An individual tile beyond `load_radius` is only removed when its covering chunk is loaded
+- Hysteresis margin (`unload_margin`, default 2 tiles) prevents thrashing at boundaries
 
 ### Coordinate Convention
 
