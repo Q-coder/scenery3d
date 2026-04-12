@@ -500,6 +500,8 @@ void S3DBuildingManager::update_buildings(Vector3 camera_pos)
 	// Camera world position to LV95.
 	double cam_e = origin_east - camera_pos.x;
 	double cam_n = camera_pos.z + origin_north;
+	last_cam_e = cam_e;
+	last_cam_n = cam_n;
 
 	// Determine which tiles are in range.
 	std::unordered_set<std::string> required;
@@ -529,40 +531,56 @@ void S3DBuildingManager::update_buildings(Vector3 camera_pos)
 				new_requests.push_back(std::move(req));
 			} else if (it->second.loaded) {
 				// Update LOD based on distance.
+				// LOD 0 = individual detail meshes (within detail_radius_m).
+				// LOD 1+ = far merged mesh.
 				int desired_lod;
 				if (dist <= (double)detail_radius_m) {
-					desired_lod = 0; // Full detail.
-				} else if (dist <= (double)load_radius_m) {
-					desired_lod = 1; // Individual boxes.
+					desired_lod = 0; // Individual buildings.
 				} else {
-					desired_lod = 2; // Far merged mesh.
+					desired_lod = 1; // Far merged mesh.
 				}
 
 				TileState &state = it->second;
-				if (desired_lod != state.lod) {
-					// Switch LOD visibility.
-					if (state.root_node) {
-						state.root_node->set_visible(desired_lod <= 1);
 
-						// Switch individual building meshes between LOD0 and LOD1.
-						if (desired_lod <= 1 && state.lod != -1 &&
-						    (state.lod > 1 || (desired_lod == 0 && state.lod == 1) ||
-						     (desired_lod == 1 && state.lod == 0))) {
-							for (auto &bld : state.buildings) {
-								if (!bld.node || bld.user_hidden) continue;
-								Ref<ArrayMesh> mesh = bld.node->get_mesh();
-								if (mesh.is_valid() && mesh->get_surface_count() >= 2) {
-									// Surface 0 = LOD0 detail, Surface 1 = LOD1 box.
-									// We swap which surface is visible by setting
-									// the mesh's active surface material transparency.
-									// Actually simpler: use surface override material.
-									// For now just show correct surface via a new mesh.
-								}
-							}
+				// Need individual meshes but tile was loaded far-only:
+				// keep far-LOD visible while re-loading with detail.
+				if (desired_lod == 0 && !state.has_detail) {
+					if (state.root_node) { state.root_node->queue_free(); state.root_node = nullptr; }
+					// Keep far_lod_node visible as placeholder during reload.
+					state.buildings.clear();
+					state.loaded = false;
+					state.loading = true;
+					state.lod = -1;
+
+					std::string file_path = std::string(buildings_path.utf8().get_data())
+						+ "/" + entry.file;
+					LoadRequest req;
+					req.tile_id = tid;
+					req.path = file_path;
+					req.distance = (int)dist;
+					new_requests.push_back(std::move(req));
+					continue;
+				}
+
+				if (desired_lod != state.lod) {
+					// Transitioning away from detail: free individual meshes
+					// to reclaim RIDs.
+					if (desired_lod >= 1 && state.has_detail) {
+						if (state.root_node) {
+							state.root_node->queue_free();
+							state.root_node = nullptr;
 						}
+						state.buildings.clear();
+						state.has_detail = false;
 					}
+
+					// Show/hide far LOD.
 					if (state.far_lod_node) {
-						state.far_lod_node->set_visible(desired_lod == 2);
+						state.far_lod_node->set_visible(desired_lod >= 1);
+					}
+					// Show/hide detail.
+					if (state.root_node) {
+						state.root_node->set_visible(desired_lod == 0);
 					}
 					state.lod = desired_lod;
 				}
@@ -637,55 +655,95 @@ void S3DBuildingManager::process_load_results()
 			continue;
 		}
 
-		// Create container node for individual buildings.
-		Node3D *root = memnew(Node3D);
-		root->set_name(String("buildings_") + String(result.tile_id.c_str()));
-		add_child(root);
-		state.root_node = root;
-
-		// Create individual building meshes.
-		for (auto &bld_data : result.buildings) {
-			if (bld_data.lod0_wall.vertices.size() == 0 &&
-			    bld_data.lod0_roof.vertices.size() == 0) continue;
-
-			// Create mesh with wall + roof surfaces from LOD0 detail geometry.
-			Ref<ArrayMesh> mesh = make_wall_roof_mesh(
-				bld_data.lod0_wall, bld_data.lod0_roof,
-				wall_material, roof_material);
-
-			if (mesh.is_null()) continue;
-
-			MeshInstance3D *mi = memnew(MeshInstance3D);
-			mi->set_name(bld_data.uuid);
-			mi->set_mesh(mesh);
-			root->add_child(mi);
-
-			BuildingInfo info;
-			info.node = mi;
-			info.uuid = bld_data.uuid;
-
-			// Check if user has hidden this building.
-			std::string uuid_std(bld_data.uuid.utf8().get_data());
-			if (hidden_buildings.find(uuid_std) != hidden_buildings.end()) {
-				info.user_hidden = true;
-				mi->set_visible(false);
-			}
-
-			state.buildings.push_back(std::move(info));
+		// Compute distance from camera to tile center (in LV95 metres).
+		bool create_detail = false;
+		auto mit = manifest.find(result.tile_id);
+		if (mit != manifest.end()) {
+			double de = mit->second.center_e - last_cam_e;
+			double dn = mit->second.center_n - last_cam_n;
+			double dist = std::sqrt(de * de + dn * dn);
+			create_detail = (dist <= (double)detail_radius_m);
 		}
 
-		// Create far-LOD merged mesh (wall + roof surfaces).
-		if (result.far_wall.vertices.size() > 0 || result.far_roof.vertices.size() > 0) {
-			Ref<ArrayMesh> far_mesh = make_wall_roof_mesh(
-				result.far_wall, result.far_roof,
-				wall_material, roof_material);
-			if (far_mesh.is_valid()) {
-				MeshInstance3D *far_mi = memnew(MeshInstance3D);
-				far_mi->set_name(String("_far_lod_") + String(result.tile_id.c_str()));
-				far_mi->set_mesh(far_mesh);
-				far_mi->set_visible(false); // Start hidden, update_buildings sets LOD.
-				add_child(far_mi);
-				state.far_lod_node = far_mi;
+		// Create container node for individual buildings (only if near).
+		if (create_detail) {
+			Node3D *root = memnew(Node3D);
+			root->set_name(String("buildings_") + String(result.tile_id.c_str()));
+			add_child(root);
+			state.root_node = root;
+
+			for (auto &bld_data : result.buildings) {
+				if (bld_data.lod0_wall.vertices.size() == 0 &&
+				    bld_data.lod0_roof.vertices.size() == 0) continue;
+
+				Ref<ArrayMesh> mesh = make_wall_roof_mesh(
+					bld_data.lod0_wall, bld_data.lod0_roof,
+					wall_material, roof_material);
+
+				if (mesh.is_null()) continue;
+
+				MeshInstance3D *mi = memnew(MeshInstance3D);
+				if (!bld_data.uuid.is_empty()) {
+					mi->set_name(bld_data.uuid);
+				}
+				mi->set_mesh(mesh);
+				root->add_child(mi);
+
+				BuildingInfo info;
+				info.node = mi;
+				info.uuid = bld_data.uuid;
+
+				std::string uuid_std(bld_data.uuid.utf8().get_data());
+				if (hidden_buildings.find(uuid_std) != hidden_buildings.end()) {
+					info.user_hidden = true;
+					mi->set_visible(false);
+				}
+
+				state.buildings.push_back(std::move(info));
+			}
+			state.has_detail = true;
+		}
+
+		// Create far-LOD merged mesh from actual building detail geometry
+		// (skip if we already have one from a previous far-only load).
+		if (!state.far_lod_node) {
+			SurfaceData merged_wall, merged_roof;
+			int wall_offset = 0, roof_offset = 0;
+			for (auto &bld_data : result.buildings) {
+				auto &w = bld_data.lod0_wall;
+				if (w.vertices.size() > 0 && w.indices.size() > 0) {
+					int base = merged_wall.vertices.size();
+					merged_wall.vertices.append_array(w.vertices);
+					merged_wall.normals.append_array(w.normals);
+					int idx_count = w.indices.size();
+					for (int i = 0; i < idx_count; i++) {
+						merged_wall.indices.push_back(w.indices[i] + base);
+					}
+				}
+				auto &r = bld_data.lod0_roof;
+				if (r.vertices.size() > 0 && r.indices.size() > 0) {
+					int base = merged_roof.vertices.size();
+					merged_roof.vertices.append_array(r.vertices);
+					merged_roof.normals.append_array(r.normals);
+					int idx_count = r.indices.size();
+					for (int i = 0; i < idx_count; i++) {
+						merged_roof.indices.push_back(r.indices[i] + base);
+					}
+				}
+			}
+
+			if (merged_wall.vertices.size() > 0 || merged_roof.vertices.size() > 0) {
+				Ref<ArrayMesh> far_mesh = make_wall_roof_mesh(
+					merged_wall, merged_roof,
+					wall_material, roof_material);
+				if (far_mesh.is_valid()) {
+					MeshInstance3D *far_mi = memnew(MeshInstance3D);
+					far_mi->set_name(String("_far_lod_") + String(result.tile_id.c_str()));
+					far_mi->set_mesh(far_mesh);
+					far_mi->set_visible(false);
+					add_child(far_mi);
+					state.far_lod_node = far_mi;
+				}
 			}
 		}
 
