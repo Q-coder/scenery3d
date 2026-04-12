@@ -4,6 +4,7 @@
 #include <godot_cpp/classes/array_mesh.hpp>
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/mesh_instance3d.hpp>
+#include <godot_cpp/classes/standard_material3d.hpp>
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/packed_vector2_array.hpp>
@@ -24,10 +25,11 @@ namespace godot
 		int tile_x = 0;
 		int tile_z = 0;
 		int tile_size = 0;
-		int lod_level = 0;
+		int lod_level = 4;
 		bool mesh_ready = false;
 
 		Ref<Image> heightmap;
+		Ref<StandardMaterial3D> material;
 
 		// Sample height at pixel coordinates, clamped to image bounds.
 		real_t sample_height(int px, int py, int img_w, int img_h) const;
@@ -42,9 +44,13 @@ namespace godot
 		// Build the terrain mesh from the stored heightmap.
 		void generate_mesh();
 
-		// Store the heightmap image and trigger mesh generation.
+		// Store the heightmap image (does NOT auto-generate mesh).
 		void set_heightmap(Ref<Image> p_heightmap);
 		Ref<Image> get_heightmap() const;
+
+		// Set shared material (used by generate_mesh if set).
+		void set_material(Ref<StandardMaterial3D> p_mat);
+		Ref<StandardMaterial3D> get_material() const;
 
 		// Returns true once the mesh has been generated.
 		bool is_mesh_ready() const;

@@ -2,6 +2,7 @@
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/math.hpp>
 #include <godot_cpp/classes/mesh.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 
 using namespace godot;
 
@@ -97,16 +98,12 @@ void S3DTile::generate_mesh()
 
 	// Generate vertices, normals, and UVs.
 	for (int gz = 0; gz < verts_z; gz++) {
-		int py = gz * stride;
-		if (py >= img_h) {
-			py = img_h - 1;
-		}
+		// Map gz linearly to pixel row: 0 -> 0, verts_z-1 -> img_h-1.
+		int py = gz * (img_h - 1) / (verts_z - 1);
 
 		for (int gx = 0; gx < verts_x; gx++) {
-			int px = gx * stride;
-			if (px >= img_w) {
-				px = img_w - 1;
-			}
+			// Map gx linearly to pixel col: 0 -> 0, verts_x-1 -> img_w-1.
+			int px = gx * (img_w - 1) / (verts_x - 1);
 
 			int idx = gz * verts_x + gx;
 
@@ -122,18 +119,17 @@ void S3DTile::generate_mesh()
 			uvs[idx] = Vector2(u, v);
 
 			// Compute smooth normal using central differences on the heightmap.
-			// Sample one stride step in each direction for consistent spacing.
-			real_t h_left = sample_height(px - stride, py, img_w, img_h);
-			real_t h_right = sample_height(px + stride, py, img_w, img_h);
-			real_t h_down = sample_height(px, py - stride, img_w, img_h);
-			real_t h_up = sample_height(px, py + stride, img_w, img_h);
+			// Always sample at 1-pixel distance for high-quality normals,
+			// independent of mesh LOD.
+			real_t h_left = sample_height(px - 1, py, img_w, img_h);
+			real_t h_right = sample_height(px + 1, py, img_w, img_h);
+			real_t h_down = sample_height(px, py - 1, img_w, img_h);
+			real_t h_up = sample_height(px, py + 1, img_w, img_h);
 
-			// The distance in world units between the two samples.
-			real_t dx = static_cast<real_t>(stride) * pixel_spacing_x * 2.0;
-			real_t dz = static_cast<real_t>(stride) * pixel_spacing_z * 2.0;
+			// The distance in world units between the two samples (2 pixels).
+			real_t dx = pixel_spacing_x * 2.0;
+			real_t dz = pixel_spacing_z * 2.0;
 
-			// At boundaries the clamping reduces the actual sample distance,
-			// but the normal approximation is still reasonable.
 			Vector3 normal = Vector3(
 				(h_left - h_right) / dx,
 				1.0,
@@ -177,6 +173,17 @@ void S3DTile::generate_mesh()
 	array_mesh.instantiate();
 	array_mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
 
+	// Apply material.
+	if (material.is_valid()) {
+		array_mesh->surface_set_material(0, material);
+	} else {
+		Ref<StandardMaterial3D> mat;
+		mat.instantiate();
+		mat->set_albedo(Color(0.45, 0.55, 0.35));
+		mat->set_cull_mode(StandardMaterial3D::CULL_DISABLED);
+		array_mesh->surface_set_material(0, mat);
+	}
+
 	set_mesh(array_mesh);
 	mesh_ready = true;
 }
@@ -185,7 +192,16 @@ void S3DTile::set_heightmap(Ref<Image> p_heightmap)
 {
 	heightmap = p_heightmap;
 	mesh_ready = false;
-	generate_mesh();
+}
+
+void S3DTile::set_material(Ref<StandardMaterial3D> p_mat)
+{
+	material = p_mat;
+}
+
+Ref<StandardMaterial3D> S3DTile::get_material() const
+{
+	return material;
 }
 
 Ref<Image> S3DTile::get_heightmap() const

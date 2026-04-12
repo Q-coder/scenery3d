@@ -24,6 +24,14 @@ void S3DElevationDB::_bind_methods()
 	ClassDB::bind_method(D_METHOD("get_tile_size"), &S3DElevationDB::get_tile_size);
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "tile_size"), "set_tile_size", "get_tile_size");
 
+	ClassDB::bind_method(D_METHOD("set_origin_east", "east"), &S3DElevationDB::set_origin_east);
+	ClassDB::bind_method(D_METHOD("get_origin_east"), &S3DElevationDB::get_origin_east);
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "origin_east"), "set_origin_east", "get_origin_east");
+
+	ClassDB::bind_method(D_METHOD("set_origin_north", "north"), &S3DElevationDB::set_origin_north);
+	ClassDB::bind_method(D_METHOD("get_origin_north"), &S3DElevationDB::get_origin_north);
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "origin_north"), "set_origin_north", "get_origin_north");
+
 	ClassDB::bind_method(D_METHOD("load_tile", "tile_x", "tile_z", "heightmap"), &S3DElevationDB::load_tile);
 	ClassDB::bind_method(D_METHOD("unload_tile", "tile_x", "tile_z"), &S3DElevationDB::unload_tile);
 	ClassDB::bind_method(D_METHOD("has_tile", "tile_x", "tile_z"), &S3DElevationDB::has_tile);
@@ -40,6 +48,26 @@ void S3DElevationDB::set_tile_size(int p_size)
 int S3DElevationDB::get_tile_size() const
 {
 	return tile_size;
+}
+
+void S3DElevationDB::set_origin_east(double p_east)
+{
+	origin_east = p_east;
+}
+
+double S3DElevationDB::get_origin_east() const
+{
+	return origin_east;
+}
+
+void S3DElevationDB::set_origin_north(double p_north)
+{
+	origin_north = p_north;
+}
+
+double S3DElevationDB::get_origin_north() const
+{
+	return origin_north;
 }
 
 void S3DElevationDB::load_tile(int tile_x, int tile_z, Ref<Image> heightmap)
@@ -72,8 +100,14 @@ bool S3DElevationDB::has_tile(int tile_x, int tile_z) const
 
 double S3DElevationDB::get_elevation(double x, double z) const
 {
-	int tile_x = (int)floor(x / tile_size);
-	int tile_z = (int)floor(z / tile_size);
+	// Convert world coordinates to absolute LV95.
+	// +X = West, so LV95_E = origin_east - x
+	double lv95_e = origin_east - x;
+	double lv95_n = z + origin_north;
+
+	// Compute absolute tile indices (matching tile_key used in load_tile).
+	int tile_x = (int)floor(lv95_e / tile_size);
+	int tile_z = (int)floor(lv95_n / tile_size);
 
 	uint64_t key = _tile_key(tile_x, tile_z);
 	if (!tiles.has(key)) {
@@ -85,8 +119,8 @@ double S3DElevationDB::get_elevation(double x, double z) const
 	int h = td.height;
 
 	// Local coordinates within the tile [0, tile_size).
-	double local_x = x - (double)tile_x * tile_size;
-	double local_z = z - (double)tile_z * tile_size;
+	double local_x = lv95_e - (double)tile_x * tile_size;
+	double local_z = lv95_n - (double)tile_z * tile_size;
 
 	// Convert to pixel coordinates.
 	double px = local_x / tile_size * (w - 1);
@@ -124,8 +158,10 @@ double S3DElevationDB::get_elevation(double x, double z) const
 
 double S3DElevationDB::get_elevation_safe(double x, double z, double default_val) const
 {
-	int tile_x = (int)floor(x / tile_size);
-	int tile_z = (int)floor(z / tile_size);
+	double lv95_e = origin_east - x;
+	double lv95_n = z + origin_north;
+	int tile_x = (int)floor(lv95_e / tile_size);
+	int tile_z = (int)floor(lv95_n / tile_size);
 
 	uint64_t key = _tile_key(tile_x, tile_z);
 	if (!tiles.has(key)) {

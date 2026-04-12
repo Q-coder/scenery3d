@@ -4,6 +4,7 @@
 #include <godot_cpp/classes/node3d.hpp>
 #include <godot_cpp/classes/ref.hpp>
 #include "s3d_elevation_db.h"
+#include "s3d_coords.h"
 
 namespace godot
 {
@@ -20,10 +21,13 @@ namespace godot
 	private:
 		int tile_size = 1024;
 		int load_radius = 8;
+		double origin_east = 2600000.0;
+		double origin_north = 1200000.0;
 		String data_path;
 
 		S3DTileManager *tile_manager = nullptr;
 		Ref<S3DElevationDB> elevation_db;
+		Ref<S3DCoords> coords;
 
 	protected:
 		static void _bind_methods();
@@ -41,11 +45,19 @@ namespace godot
 		// Access the elevation database directly (e.g. for JSBSim integration).
 		Ref<S3DElevationDB> get_elevation_db() const;
 
+		Ref<S3DCoords> get_coords() const;
+
 		void set_tile_size(int p_size);
 		int get_tile_size() const;
 
 		void set_load_radius(int p_radius);
 		int get_load_radius() const;
+
+		void set_origin_east(double p_east);
+		double get_origin_east() const;
+
+		void set_origin_north(double p_north);
+		double get_origin_north() const;
 
 		void set_data_path(const String &p_path);
 		String get_data_path() const;

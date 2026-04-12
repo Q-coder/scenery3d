@@ -6,6 +6,7 @@
 #include "s3d_tile_manager.h"
 #include "s3d_tile.h"
 #include "s3d_elevation_db.h"
+#include "s3d_coords.h"
 
 using namespace godot;
 
@@ -19,6 +20,7 @@ void initialize_scenery3d_module(ModuleInitializationLevel p_level)
 	ClassDB::register_class<S3DTileManager>();
 	ClassDB::register_class<S3DTile>();
 	ClassDB::register_class<S3DElevationDB>();
+	ClassDB::register_class<S3DCoords>();
 }
 
 void uninitialize_scenery3d_module(ModuleInitializationLevel p_level)
