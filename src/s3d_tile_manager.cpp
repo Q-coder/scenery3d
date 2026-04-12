@@ -28,6 +28,7 @@ S3DTileManager::~S3DTileManager()
 {
 	stop_worker();
 	tiles.clear();
+	chunks.clear();
 }
 
 // --- LOD ring configuration ---
@@ -99,24 +100,115 @@ void S3DTileManager::worker_func()
 			work_queue.pop_front();
 		}
 
-		// Read file using C++ I/O (thread-safe, no Godot API calls).
 		LoadResult result;
 		result.ei = req.ei;
 		result.ni = req.ni;
 		result.key = req.key;
-		result.tile_size = req.tile_size;
-		result.desired_lod = req.desired_lod;
+		result.is_chunk = req.is_chunk;
 		result.success = false;
 
-		size_t expected_size = (size_t)req.tile_size * req.tile_size * 4;
-		std::ifstream file(req.path, std::ios::binary);
-		if (file.is_open()) {
-			result.raw_bytes.resize(expected_size);
-			file.read(reinterpret_cast<char *>(result.raw_bytes.data()), expected_size);
-			if ((size_t)file.gcount() == expected_size) {
+		if (req.is_chunk) {
+			// --- Chunk: read multiple tile files, composite into small heightmap ---
+			int cres = req.composite_res;
+			int csize = req.chunk_tile_count;
+			int base_ei = req.chunk_grid_ei * csize;
+			int base_ni = req.chunk_grid_ni * csize;
+			int ts = req.tile_size;
+
+			result.composite_res = cres;
+			result.tile_size = csize * ts;
+			result.desired_lod = 0;
+
+			std::vector<float> composite(cres * cres, 0.0f);
+			bool any_data = false;
+
+			// Cache tile data to avoid re-reading the same file.
+			std::unordered_map<uint64_t, std::vector<uint8_t>> tile_cache;
+			size_t expected = (size_t)ts * ts * 4;
+
+			for (int cy = 0; cy < cres; cy++) {
+				for (int cx = 0; cx < cres; cx++) {
+					// Composite pixel (0,0) = SE corner of chunk.
+					// cx goes E→W, cy goes S→N (matching provpilot convention).
+					double frac_x = (double)cx / (cres - 1); // 0=east edge, 1=west edge
+					double frac_y = (double)cy / (cres - 1); // 0=south edge, 1=north edge
+
+					double lv95_e = (double)(base_ei + csize) * ts - frac_x * csize * ts;
+					double lv95_n = (double)base_ni * ts + frac_y * csize * ts;
+
+					int tei = (int)std::floor(lv95_e / ts);
+					int tni = (int)std::floor(lv95_n / ts);
+
+					// Clamp to chunk bounds.
+					if (tei < base_ei) tei = base_ei;
+					if (tei >= base_ei + csize) tei = base_ei + csize - 1;
+					if (tni < base_ni) tni = base_ni;
+					if (tni >= base_ni + csize) tni = base_ni + csize - 1;
+
+					uint64_t tkey = tile_key(tei, tni);
+					auto cache_it = tile_cache.find(tkey);
+					if (cache_it == tile_cache.end()) {
+						int lv95_east = tei * ts;
+						int lv95_north = tni * ts;
+						std::string tpath = req.base_path + "/tile_"
+							+ std::to_string(lv95_east) + "_"
+							+ std::to_string(lv95_north) + ".raw";
+						std::vector<uint8_t> data;
+						std::ifstream file(tpath, std::ios::binary);
+						if (file.is_open()) {
+							data.resize(expected);
+							file.read(reinterpret_cast<char *>(data.data()), expected);
+							if ((size_t)file.gcount() != expected) data.clear();
+							file.close();
+						}
+						tile_cache[tkey] = std::move(data);
+						cache_it = tile_cache.find(tkey);
+					}
+
+					if (cache_it->second.empty()) continue;
+
+					// Sample pixel from raw tile.
+					// Raw: pixel(0,0) = SE, col goes E→W, row goes S→N.
+					double local_e = lv95_e - (double)tei * ts;
+					double local_n = lv95_n - (double)tni * ts;
+
+					// col 0 = east edge (local_e = ts), col ts-1 = west edge (local_e = 0)
+					int pcol = (int)std::round((ts - local_e) / ts * (ts - 1));
+					// row 0 = south edge (local_n = 0), row ts-1 = north edge (local_n = ts)
+					int prow = (int)std::round(local_n / ts * (ts - 1));
+
+					pcol = std::max(0, std::min(ts - 1, pcol));
+					prow = std::max(0, std::min(ts - 1, prow));
+
+					size_t offset = ((size_t)prow * ts + pcol) * 4;
+					float height;
+					memcpy(&height, &cache_it->second[offset], 4);
+
+					composite[cy * cres + cx] = height;
+					any_data = true;
+				}
+			}
+
+			if (any_data) {
+				result.raw_bytes.resize(cres * cres * 4);
+				memcpy(result.raw_bytes.data(), composite.data(), cres * cres * 4);
 				result.success = true;
 			}
-			file.close();
+		} else {
+			// --- Regular tile: read single file ---
+			result.tile_size = req.tile_size;
+			result.desired_lod = req.desired_lod;
+
+			size_t expected_size = (size_t)req.tile_size * req.tile_size * 4;
+			std::ifstream file(req.path, std::ios::binary);
+			if (file.is_open()) {
+				result.raw_bytes.resize(expected_size);
+				file.read(reinterpret_cast<char *>(result.raw_bytes.data()), expected_size);
+				if ((size_t)file.gcount() == expected_size) {
+					result.success = true;
+				}
+				file.close();
+			}
 		}
 
 		{
@@ -139,9 +231,69 @@ void S3DTileManager::process_load_results(int &verts_generated)
 			results_queue.pop_front();
 		}
 
+		if (result.is_chunk) {
+			// --- Process chunk result ---
+			auto it = chunks.find(result.key);
+			if (it == chunks.end()) continue;
+
+			TileState &state = it->second;
+			state.loading = false;
+
+			if (!result.success) {
+				state.no_data = true;
+				continue;
+			}
+
+			int cres = result.composite_res;
+			int chunk_verts = cres * cres;
+			if (verts_generated + chunk_verts > VERTEX_BUDGET_PER_FRAME && verts_generated > 0) {
+				state.loading = true;
+				std::lock_guard<std::mutex> lock(results_mutex);
+				results_queue.push_front(std::move(result));
+				break;
+			}
+
+			PackedByteArray bytes;
+			bytes.resize(result.raw_bytes.size());
+			memcpy(bytes.ptrw(), result.raw_bytes.data(), result.raw_bytes.size());
+
+			Ref<Image> heightmap = Image::create_from_data(
+				cres, cres, false, Image::FORMAT_RF, bytes);
+			if (heightmap.is_null()) {
+				state.no_data = true;
+				continue;
+			}
+
+			if (!state.node) {
+				S3DTile *tile = memnew(S3DTile);
+				tile->set_tile_x(result.ei);
+				tile->set_tile_z(result.ni);
+				// Chunk covers chunk_size * tile_size meters, not just tile_size.
+				tile->set_tile_size(tile_size * chunk_size);
+				tile->set_material(shared_material);
+
+				int base_ei = result.ei * chunk_size;
+				int base_ni = result.ni * chunk_size;
+				double world_x = origin_east - (double)(base_ei + chunk_size) * tile_size;
+				double world_z = (double)base_ni * tile_size - origin_north;
+				tile->set_position(Vector3(world_x, 0.0, world_z));
+
+				add_child(tile);
+				state.node = tile;
+			}
+
+			state.node->set_heightmap(heightmap);
+			state.node->set_lod_level(0); // Use every pixel.
+			state.node->generate_mesh();
+			state.current_lod = 0;
+			state.node->set_heightmap(Ref<Image>()); // Free memory.
+			verts_generated += chunk_verts;
+			continue;
+		}
+
+		// --- Process regular tile result ---
 		auto it = tiles.find(result.key);
 		if (it == tiles.end()) {
-			// Tile was unloaded while loading — discard result.
 			continue;
 		}
 
@@ -149,26 +301,22 @@ void S3DTileManager::process_load_results(int &verts_generated)
 		state.loading = false;
 
 		if (!result.success) {
-			// File not found — mark as no-data so we don't retry.
 			state.no_data = true;
 			continue;
 		}
 
-		// Check vertex budget before meshing.
 		int desired_lod = state.desired_lod >= 0 ? state.desired_lod : result.desired_lod;
 		int stride = 1 << desired_lod;
 		int verts_per_axis = (result.tile_size - 1) / stride + 1;
 		int tile_verts = verts_per_axis * verts_per_axis;
 
 		if (verts_generated + tile_verts > VERTEX_BUDGET_PER_FRAME && verts_generated > 0) {
-			// Over budget — push result back for next frame.
 			state.loading = true;
 			std::lock_guard<std::mutex> lock(results_mutex);
 			results_queue.push_front(std::move(result));
 			break;
 		}
 
-		// Create Image from raw bytes on main thread.
 		PackedByteArray bytes;
 		bytes.resize(result.raw_bytes.size());
 		memcpy(bytes.ptrw(), result.raw_bytes.data(), result.raw_bytes.size());
@@ -181,11 +329,6 @@ void S3DTileManager::process_load_results(int &verts_generated)
 			continue;
 		}
 
-		// No flips needed: provpilot's conversion already placed
-		// pixel(0,0) at SE corner, matching our convention where
-		// gx=0,gz=0 maps to (most-East=lowest-X, most-South=lowest-Z).
-
-		// Create or update the tile node.
 		if (!state.node) {
 			S3DTile *tile = memnew(S3DTile);
 			tile->set_tile_x(result.ei);
@@ -193,7 +336,6 @@ void S3DTileManager::process_load_results(int &verts_generated)
 			tile->set_tile_size(result.tile_size);
 			tile->set_material(shared_material);
 
-			// +X = West: east edge (lowest X) at origin_E - (ei+1)*tile_size.
 			double world_x = origin_east - (double)(result.ei + 1) * tile_size;
 			double world_z = (double)result.ni * tile_size - origin_north;
 			tile->set_position(Vector3(world_x, 0.0, world_z));
@@ -208,12 +350,10 @@ void S3DTileManager::process_load_results(int &verts_generated)
 		state.current_lod = desired_lod;
 		verts_generated += tile_verts;
 
-		// Register with elevation DB for close tiles only.
 		if (desired_lod < LOD_DISCARD_THRESHOLD && elevation_db.is_valid()) {
 			elevation_db->load_tile(result.ei, result.ni, heightmap);
 		}
 
-		// Discard heightmap for distant tiles to save memory.
 		if (desired_lod >= LOD_DISCARD_THRESHOLD) {
 			state.node->set_heightmap(Ref<Image>());
 		}
@@ -234,6 +374,10 @@ void S3DTileManager::_bind_methods()
 	ClassDB::bind_method(D_METHOD("set_load_radius", "radius"), &S3DTileManager::set_load_radius);
 	ClassDB::bind_method(D_METHOD("get_load_radius"), &S3DTileManager::get_load_radius);
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "load_radius"), "set_load_radius", "get_load_radius");
+
+	ClassDB::bind_method(D_METHOD("set_far_radius", "radius"), &S3DTileManager::set_far_radius);
+	ClassDB::bind_method(D_METHOD("get_far_radius"), &S3DTileManager::get_far_radius);
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "far_radius"), "set_far_radius", "get_far_radius");
 
 	ClassDB::bind_method(D_METHOD("set_load_budget", "budget"), &S3DTileManager::set_load_budget);
 	ClassDB::bind_method(D_METHOD("get_load_budget"), &S3DTileManager::get_load_budget);
@@ -333,11 +477,30 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 		}
 	}
 
-	// 2. Unload tiles outside range.
+	// 2. Unload tiles outside range (with hysteresis margin).
+	// For tiles entering the chunk zone, only remove if the covering chunk
+	// is loaded so there's no gap during the handoff.
+	int unload_radius = max_radius + unload_margin;
+	bool have_chunks = (far_radius > max_radius && chunk_size >= 1);
 	std::vector<uint64_t> to_remove;
 	for (auto &[key, state] : tiles) {
-		if (required.find(key) == required.end()) {
-			to_remove.push_back(key);
+		int ei = (int)(int32_t)(key >> 32);
+		int ni = (int)(int32_t)(key & 0xFFFFFFFF);
+		int dist = std::max(std::abs(ei - cam_ei), std::abs(ni - cam_ni));
+		if (dist > unload_radius) {
+			if (have_chunks && dist <= far_radius) {
+				// Tile is in chunk zone — only unload if chunk is ready.
+				int cg_ei = (ei >= 0) ? ei / chunk_size : (ei - chunk_size + 1) / chunk_size;
+				int cg_ni = (ni >= 0) ? ni / chunk_size : (ni - chunk_size + 1) / chunk_size;
+				uint64_t ckey = tile_key(cg_ei, cg_ni);
+				auto cit = chunks.find(ckey);
+				if (cit != chunks.end() && !cit->second.loading && cit->second.node) {
+					to_remove.push_back(key);
+				}
+				// else: keep tile until chunk is ready
+			} else {
+				to_remove.push_back(key);
+			}
 		}
 	}
 
@@ -436,13 +599,146 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 		}
 		work_cv.notify_all();
 	}
+
+	// ===== FAR TERRAIN CHUNKS =====
+	if (far_radius <= max_radius || chunk_size < 1) return;
+
+	int far_chunk_radius = (far_radius + chunk_size - 1) / chunk_size;
+	int cam_cg_ei = (cam_ei >= 0)
+		? cam_ei / chunk_size
+		: (cam_ei - chunk_size + 1) / chunk_size;
+	int cam_cg_ni = (cam_ni >= 0)
+		? cam_ni / chunk_size
+		: (cam_ni - chunk_size + 1) / chunk_size;
+
+	std::unordered_set<uint64_t> required_chunks;
+	std::vector<LoadRequest> chunk_requests;
+	std::string base_path_str;
+	if (!data_path.is_empty()) {
+		base_path_str = std::string(data_path.utf8().get_data());
+	}
+
+	for (int dcg_ei = -far_chunk_radius; dcg_ei <= far_chunk_radius; dcg_ei++) {
+		for (int dcg_ni = -far_chunk_radius; dcg_ni <= far_chunk_radius; dcg_ni++) {
+			int cg_ei = cam_cg_ei + dcg_ei;
+			int cg_ni = cam_cg_ni + dcg_ni;
+
+			// Compute tile distances from this chunk to camera.
+			int base_ei = cg_ei * chunk_size;
+			int base_ni = cg_ni * chunk_size;
+			int closest_ei = std::max(base_ei, std::min(cam_ei, base_ei + chunk_size - 1));
+			int closest_ni = std::max(base_ni, std::min(cam_ni, base_ni + chunk_size - 1));
+			int min_dist = std::max(std::abs(closest_ei - cam_ei), std::abs(closest_ni - cam_ni));
+
+			// Max distance: farthest tile in chunk from camera.
+			int max_dei = std::max(std::abs(base_ei - cam_ei), std::abs(base_ei + chunk_size - 1 - cam_ei));
+			int max_dni = std::max(std::abs(base_ni - cam_ni), std::abs(base_ni + chunk_size - 1 - cam_ni));
+			int max_dist = std::max(max_dei, max_dni);
+
+			// Only skip if ALL tiles in chunk are covered by individual tiles.
+			if (max_dist <= max_radius) continue;
+			// Skip chunks beyond far radius (use closest tile).
+			if (min_dist > far_radius) continue;
+
+			uint64_t ckey = tile_key(cg_ei, cg_ni);
+			required_chunks.insert(ckey);
+
+			auto it = chunks.find(ckey);
+			if (it == chunks.end()) {
+				TileState state;
+				state.desired_lod = 0;
+				state.loading = true;
+				chunks[ckey] = state;
+
+				LoadRequest req;
+				req.is_chunk = true;
+				req.ei = cg_ei;
+				req.ni = cg_ni;
+				req.key = ckey;
+				req.chunk_grid_ei = cg_ei;
+				req.chunk_grid_ni = cg_ni;
+				req.chunk_tile_count = chunk_size;
+				req.composite_res = CHUNK_COMPOSITE_RES;
+				req.tile_size = tile_size;
+				req.base_path = base_path_str;
+				req.distance = min_dist;
+				chunk_requests.push_back(std::move(req));
+			}
+		}
+	}
+
+	// Unload out-of-range chunks (with hysteresis margin).
+	// For chunks entering the individual-tile zone, only remove once the
+	// individual tiles covering them are actually loaded (no gaps).
+	int chunk_unload_far = far_radius + unload_margin;
+	std::vector<uint64_t> chunks_to_remove;
+	for (auto &[key, state] : chunks) {
+		int cg_ei = (int)(int32_t)(key >> 32);
+		int cg_ni = (int)(int32_t)(key & 0xFFFFFFFF);
+		int base_ei = cg_ei * chunk_size;
+		int base_ni = cg_ni * chunk_size;
+		int closest_ei = std::max(base_ei, std::min(cam_ei, base_ei + chunk_size - 1));
+		int closest_ni = std::max(base_ni, std::min(cam_ni, base_ni + chunk_size - 1));
+		int min_dist = std::max(std::abs(closest_ei - cam_ei), std::abs(closest_ni - cam_ni));
+		// Max distance: farthest tile in chunk from camera.
+		int max_dei = std::max(std::abs(base_ei - cam_ei), std::abs(base_ei + chunk_size - 1 - cam_ei));
+		int max_dni = std::max(std::abs(base_ni - cam_ni), std::abs(base_ni + chunk_size - 1 - cam_ni));
+		int max_dist_in_chunk = std::max(max_dei, max_dni);
+		if (min_dist > chunk_unload_far) {
+			chunks_to_remove.push_back(key);
+		} else if (max_dist_in_chunk <= max_radius) {
+			// Chunk fully inside individual tile zone — only remove if all
+			// overlapping tile positions are loaded (not still loading).
+			bool all_covered = true;
+			for (int dei = 0; dei < chunk_size && all_covered; dei++) {
+				for (int dni = 0; dni < chunk_size && all_covered; dni++) {
+					int tei = base_ei + dei;
+					int tni = base_ni + dni;
+					int tdist = std::max(std::abs(tei - cam_ei), std::abs(tni - cam_ni));
+					if (tdist <= max_radius) {
+						uint64_t tkey = tile_key(tei, tni);
+						auto it = tiles.find(tkey);
+						if (it == tiles.end() || it->second.loading || !it->second.node) {
+							all_covered = false;
+						}
+					}
+				}
+			}
+			if (all_covered) {
+				chunks_to_remove.push_back(key);
+			}
+		}
+	}
+	for (uint64_t key : chunks_to_remove) {
+		auto it = chunks.find(key);
+		if (it != chunks.end()) {
+			if (it->second.node) {
+				it->second.node->queue_free();
+			}
+			chunks.erase(it);
+		}
+	}
+
+	// Queue chunk requests (low priority — after individual tiles).
+	if (!chunk_requests.empty()) {
+		std::sort(chunk_requests.begin(), chunk_requests.end(),
+			[](const LoadRequest &a, const LoadRequest &b) {
+				return a.distance < b.distance;
+			});
+
+		std::lock_guard<std::mutex> lock(work_mutex);
+		for (auto &req : chunk_requests) {
+			work_queue.push_back(std::move(req));
+		}
+		work_cv.notify_all();
+	}
 }
 
 // --- Getters / Setters ---
 
 int S3DTileManager::get_active_tile_count() const
 {
-	return (int)tiles.size();
+	return (int)tiles.size() + (int)chunks.size();
 }
 
 void S3DTileManager::set_tile_size(int p_size)
@@ -464,6 +760,16 @@ void S3DTileManager::set_load_radius(int p_radius)
 int S3DTileManager::get_load_radius() const
 {
 	return load_radius;
+}
+
+void S3DTileManager::set_far_radius(int p_radius)
+{
+	far_radius = p_radius;
+}
+
+int S3DTileManager::get_far_radius() const
+{
+	return far_radius;
 }
 
 void S3DTileManager::set_load_budget(int p_budget)

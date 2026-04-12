@@ -53,6 +53,14 @@ namespace godot
 			int tile_size;
 			int desired_lod;
 			int distance;
+
+			// Chunk fields (is_chunk == true).
+			bool is_chunk = false;
+			int chunk_grid_ei = 0;
+			int chunk_grid_ni = 0;
+			int chunk_tile_count = 0;
+			int composite_res = 0;
+			std::string base_path;
 		};
 
 		// Background file load result.
@@ -63,10 +71,15 @@ namespace godot
 			int tile_size;
 			int desired_lod;
 			bool success = false;
+			bool is_chunk = false;
+			int composite_res = 0;
 		};
 
 		// Active tile states keyed by tile_key(ei, ni).
 		std::unordered_map<uint64_t, TileState> tiles;
+
+		// Far terrain chunks keyed by tile_key(chunk_grid_ei, chunk_grid_ni).
+		std::unordered_map<uint64_t, TileState> chunks;
 
 		// LOD ring configuration (sorted inner to outer).
 		std::vector<LODRing> lod_rings;
@@ -87,6 +100,8 @@ namespace godot
 		// Configuration.
 		int tile_size = 1024;
 		int load_radius = 8;
+		int far_radius = 200;
+		int chunk_size = 8;
 		int load_budget = 4;
 		int unload_margin = 2;
 		String data_path;
@@ -99,6 +114,9 @@ namespace godot
 
 		// Max vertices to generate per frame (limits mesh build cost).
 		static constexpr int VERTEX_BUDGET_PER_FRAME = 200000;
+
+		// Resolution of chunk composite heightmaps.
+		static constexpr int CHUNK_COMPOSITE_RES = 33;
 
 		Ref<S3DElevationDB> elevation_db;
 
@@ -131,6 +149,9 @@ namespace godot
 
 		void set_load_radius(int p_radius);
 		int get_load_radius() const;
+
+		void set_far_radius(int p_radius);
+		int get_far_radius() const;
 
 		void set_load_budget(int p_budget);
 		int get_load_budget() const;

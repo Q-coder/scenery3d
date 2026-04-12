@@ -21,6 +21,7 @@ namespace godot
 	private:
 		int tile_size = 1024;
 		int load_radius = 8;
+		int far_radius = 200;
 		double origin_east = 2600000.0;
 		double origin_north = 1200000.0;
 		String data_path;
@@ -52,6 +53,9 @@ namespace godot
 
 		void set_load_radius(int p_radius);
 		int get_load_radius() const;
+
+		void set_far_radius(int p_radius);
+		int get_far_radius() const;
 
 		void set_origin_east(double p_east);
 		double get_origin_east() const;

@@ -13,6 +13,7 @@ ambient_light_energy = 0.4
 
 [node name="Scenery3D" type="Scenery3D" parent="." unique_id=806723349]
 load_radius = 50
+far_radius = 200
 data_path = "/Users/gery/code/provpilot/scenery/terrain"
 
 [node name="Camera3D" type="Camera3D" parent="." unique_id=1436725578]
@@ -21,7 +22,7 @@ far = 200000.0
 script = ExtResource("1")
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1798709995]
-transform = Transform3D(0.9659258262890683, -0.12940956780417656, -0.22414384191522396, 0, 0.866025302838276, -0.5000001748438417, 0.2588190451025207, 0.4829630820307165, 0.8365162062313023, 31, 1233, -437)
+transform = Transform3D(0.9659258262890684, -0.12940956780417656, -0.22414384191522396, 0, 0.866025302838276, -0.5000001748438417, 0.2588190451025207, 0.4829630820307165, 0.8365162062313023, 31, 1233, -437)
 light_energy = 0.8
 shadow_enabled = true
 directional_shadow_max_distance = 10000.0
