@@ -25,6 +25,8 @@ namespace godot
 	private:
 		HashMap<uint64_t, TileData> tiles;
 		int tile_size = 1024;
+		double origin_east = 2600000.0;
+		double origin_north = 1200000.0;
 
 		static uint64_t _tile_key(int tile_x, int tile_z);
 
@@ -37,6 +39,12 @@ namespace godot
 
 		void set_tile_size(int p_size);
 		int get_tile_size() const;
+
+		void set_origin_east(double p_east);
+		double get_origin_east() const;
+
+		void set_origin_north(double p_north);
+		double get_origin_north() const;
 
 		void load_tile(int tile_x, int tile_z, Ref<Image> heightmap);
 		void unload_tile(int tile_x, int tile_z);
