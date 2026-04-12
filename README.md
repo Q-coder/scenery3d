@@ -18,6 +18,7 @@ Scenery3D replaces Terrain3D for flight simulation use cases, solving the key ar
 Scenery3D (Node3D)              — Main node, configuration and coordination
 ├── S3DTileManager (Node3D)     — Background thread pool, tile lifecycle, LOD rings
 │   └── S3DTile (MeshInstance3D)— Individual terrain tile with heightmap mesh
+├── S3DBuildingManager (Node3D) — Background GLB loading, LOD, per-building visibility
 ├── S3DElevationDB (RefCounted) — Fast elevation lookup across all loaded tiles
 └── S3DCoords (RefCounted)      — WGS84 ↔ LV95/CH1903+ ↔ Godot world conversion
 ```
@@ -64,7 +65,7 @@ Default origin: E=2,600,000 / N=1,200,000 (Bern area).
 Designed for SwissTopo data:
 - **Terrain elevation:** swissALTI3D (0.5m resolution)
 - **Orthophotos:** SWISSIMAGE (JPEG tiles, planned)
-- **Buildings:** swissBUILDINGS3D (GLB, planned)
+- **Buildings:** swissBUILDINGS3D 3.0 (converted to GLB per tile)
 
 ### Terrain Tile Format
 
@@ -76,6 +77,51 @@ ProVPilot conversion from SwissTopo GeoTIFFs (flipud + fliplr applied).
 
 Pre-converted tiles for all of Switzerland (~42,400 files) are available
 from the ProVPilot scenery pipeline.
+
+### Building Tile Format
+
+Each building tile is a GLB file containing:
+- One glTF node per building (named by UUID), each with 4 primitives:
+  `wall_detail`, `roof_detail`, `wall_box`, `roof_box`
+- One `_far_lod` node with 2 primitives: merged `wall` + `roof` boxes for all buildings
+
+Naming: `buildings_{tile_id}.glb` with a `manifest.json` index.
+
+Faces are split into **wall** (normal Y ≤ 0.5) and **roof** (normal Y > 0.5) for
+separate coloring. All geometry uses flat normals (3 unique vertices per triangle)
+and outward-oriented faces.
+
+#### Building LOD System
+
+| Distance        | Rendering                                  |
+|-----------------|--------------------------------------------|
+| ≤ detail_radius | Individual building meshes (hide/show per UUID) |
+| > detail_radius | Single merged mesh per tile (detail geometry) |
+
+Far tiles only create 1 MeshInstance3D each (merged mesh). Individual building
+meshes are freed when leaving detail range, reclaiming GPU RIDs. When
+re-entering detail range, the merged mesh stays visible as a placeholder until
+the detail meshes finish loading (no blink).
+
+#### Conversion Script
+
+`scripts/convert_buildings.py` downloads swissBUILDINGS3D 3.0 tiles from the
+SwissTopo STAC API and converts them to GLB:
+
+```bash
+# Convert a region (LV95 bounding box)
+python3 scripts/convert_buildings.py --download \
+  --bbox 2595000 1195000 2610000 1210000 \
+  -o /path/to/buildings/
+
+# Convert all of Switzerland
+python3 scripts/convert_buildings.py --download \
+  --bbox 2485000 1074000 2834000 1296000 \
+  -o /path/to/buildings/ --cache /path/to/cache/
+```
+
+The script requires `fiona`, `numpy`, `requests`, and `pyproj`.
+Full Switzerland: ~3,218 tiles, ~2.5M buildings, ~300 MB GLB.
 
 ## Building
 

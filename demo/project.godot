@@ -22,4 +22,4 @@ window/size/viewport_height=1600
 [scenery3d]
 
 data_path="/Users/gery/code/provpilot/scenery/terrain"
-buildings_path="/tmp/scenery3d_buildings"
+buildings_path="/Users/gery/provpilot/scenery/buildings"

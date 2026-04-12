@@ -51,6 +51,7 @@ namespace godot
 			bool loading = false;
 			bool loaded = false;
 			bool no_data = false;
+			bool has_detail = false; // Individual building meshes created.
 			int lod = -1; // 0=detail, 1=boxes, 2=far-merged
 		};
 
@@ -113,6 +114,10 @@ namespace godot
 		// Shared materials.
 		Ref<StandardMaterial3D> wall_material;
 		Ref<StandardMaterial3D> roof_material;
+
+		// Last known camera position in LV95 (for process_load_results).
+		double last_cam_e = 0;
+		double last_cam_n = 0;
 
 		// Configuration.
 		String buildings_path;
