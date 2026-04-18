@@ -8,6 +8,8 @@
 #include "s3d_elevation_db.h"
 #include "s3d_coords.h"
 #include "s3d_building_manager.h"
+#include "s3d_water_manager.h"
+#include "s3d_road_manager.h"
 
 using namespace godot;
 
@@ -23,6 +25,8 @@ void initialize_scenery3d_module(ModuleInitializationLevel p_level)
 	ClassDB::register_class<S3DElevationDB>();
 	ClassDB::register_class<S3DCoords>();
 	ClassDB::register_class<S3DBuildingManager>();
+	ClassDB::register_class<S3DWaterManager>();
+	ClassDB::register_class<S3DRoadManager>();
 }
 
 void uninitialize_scenery3d_module(ModuleInitializationLevel p_level)

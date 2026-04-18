@@ -369,6 +369,10 @@ S3DBuildingManager::LoadResult S3DBuildingManager::parse_glb(
 
 void S3DBuildingManager::load_manifest()
 {
+	// Ensure we only attempt this once even if the manifest is missing
+	// or malformed, to avoid per-frame warning spam.
+	manifest_loaded = true;
+
 	if (buildings_path.is_empty()) return;
 
 	String manifest_file = buildings_path + "/manifest.json";
