@@ -1,6 +1,8 @@
 #include "scenery3d.h"
 #include "s3d_tile_manager.h"
 #include "s3d_building_manager.h"
+#include "s3d_water_manager.h"
+#include "s3d_road_manager.h"
 
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
@@ -48,9 +50,25 @@ void Scenery3D::_bind_methods()
 	ClassDB::bind_method(D_METHOD("get_data_path"), &Scenery3D::get_data_path);
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "data_path"), "set_data_path", "get_data_path");
 
+	ClassDB::bind_method(D_METHOD("set_data_paths", "paths"), &Scenery3D::set_data_paths);
+	ClassDB::bind_method(D_METHOD("get_data_paths"), &Scenery3D::get_data_paths);
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_STRING_ARRAY, "data_paths"), "set_data_paths", "get_data_paths");
+
 	ClassDB::bind_method(D_METHOD("set_buildings_path", "path"), &Scenery3D::set_buildings_path);
 	ClassDB::bind_method(D_METHOD("get_buildings_path"), &Scenery3D::get_buildings_path);
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "buildings_path"), "set_buildings_path", "get_buildings_path");
+
+	ClassDB::bind_method(D_METHOD("set_water_paths", "paths"), &Scenery3D::set_water_paths);
+	ClassDB::bind_method(D_METHOD("get_water_paths"), &Scenery3D::get_water_paths);
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_STRING_ARRAY, "water_paths"), "set_water_paths", "get_water_paths");
+
+	ClassDB::bind_method(D_METHOD("set_road_paths", "paths"), &Scenery3D::set_road_paths);
+	ClassDB::bind_method(D_METHOD("get_road_paths"), &Scenery3D::get_road_paths);
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_STRING_ARRAY, "road_paths"), "set_road_paths", "get_road_paths");
+
+	ClassDB::bind_method(D_METHOD("set_orthophoto_path", "path"), &Scenery3D::set_orthophoto_path);
+	ClassDB::bind_method(D_METHOD("get_orthophoto_path"), &Scenery3D::get_orthophoto_path);
+	ADD_PROPERTY(PropertyInfo(Variant::STRING, "orthophoto_path"), "set_orthophoto_path", "get_orthophoto_path");
 
 	ClassDB::bind_method(D_METHOD("hide_building", "uuid"), &Scenery3D::hide_building);
 	ClassDB::bind_method(D_METHOD("show_building", "uuid"), &Scenery3D::show_building);
@@ -59,15 +77,23 @@ void Scenery3D::_bind_methods()
 
 void Scenery3D::_ready()
 {
-	// Resolve data_path: use project setting "scenery3d/data_path" as fallback.
-	if (data_path.is_empty()) {
+	// Resolve data_paths: if empty, fall back to data_path (single),
+	// then to project setting "scenery3d/data_path".
+	if (data_paths.is_empty() && !data_path.is_empty()) {
+		data_paths.push_back(data_path);
+	}
+	if (data_paths.is_empty()) {
 		ProjectSettings *ps = ProjectSettings::get_singleton();
 		if (ps && ps->has_setting("scenery3d/data_path")) {
-			data_path = ps->get_setting("scenery3d/data_path");
+			String p = ps->get_setting("scenery3d/data_path");
+			if (!p.is_empty()) {
+				data_path = p;
+				data_paths.push_back(p);
+			}
 		}
 	}
-	if (data_path.is_empty()) {
-		UtilityFunctions::push_warning("Scenery3D: data_path is not set. Set it in the inspector or via project setting 'scenery3d/data_path'.");
+	if (data_paths.is_empty()) {
+		UtilityFunctions::push_warning("Scenery3D: data_path(s) not set. Set data_path or data_paths in the inspector or via project setting 'scenery3d/data_path'.");
 	}
 
 	// Create and configure the tile manager.
@@ -76,9 +102,12 @@ void Scenery3D::_ready()
 	tile_manager->set_tile_size(tile_size);
 	tile_manager->set_load_radius(load_radius);
 	tile_manager->set_far_radius(far_radius);
-	tile_manager->set_data_path(data_path);
+	tile_manager->set_data_paths(data_paths);
 	tile_manager->set_origin_east(origin_east);
 	tile_manager->set_origin_north(origin_north);
+	if (!orthophoto_path.is_empty()) {
+		tile_manager->set_orthophoto_path(orthophoto_path);
+	}
 
 	// Create the elevation database and share it with the tile manager.
 	elevation_db.instantiate();
@@ -112,6 +141,42 @@ void Scenery3D::_ready()
 				building_manager->set_origin_north(origin_north);
 			}
 		}
+	}
+
+	// Create the water manager.
+	if (water_paths.is_empty()) {
+		ProjectSettings *ps = ProjectSettings::get_singleton();
+		if (ps && ps->has_setting("scenery3d/water_paths")) {
+			Variant wv = ps->get_setting("scenery3d/water_paths");
+			if (wv.get_type() == Variant::PACKED_STRING_ARRAY) {
+				water_paths = wv;
+			}
+		}
+	}
+	if (!water_paths.is_empty()) {
+		water_manager = memnew(S3DWaterManager);
+		add_child(water_manager);
+		water_manager->set_origin_east(origin_east);
+		water_manager->set_origin_north(origin_north);
+		water_manager->set_water_paths(water_paths);
+	}
+
+	// Create the road manager.
+	if (road_paths.is_empty()) {
+		ProjectSettings *ps = ProjectSettings::get_singleton();
+		if (ps && ps->has_setting("scenery3d/road_paths")) {
+			Variant rv = ps->get_setting("scenery3d/road_paths");
+			if (rv.get_type() == Variant::PACKED_STRING_ARRAY) {
+				road_paths = rv;
+			}
+		}
+	}
+	if (!road_paths.is_empty()) {
+		road_manager = memnew(S3DRoadManager);
+		add_child(road_manager);
+		road_manager->set_origin_east(origin_east);
+		road_manager->set_origin_north(origin_north);
+		road_manager->set_road_paths(road_paths);
 	}
 }
 
@@ -190,6 +255,19 @@ String Scenery3D::get_data_path() const
 	return data_path;
 }
 
+void Scenery3D::set_data_paths(const PackedStringArray &p_paths)
+{
+	data_paths = p_paths;
+	if (tile_manager) {
+		tile_manager->set_data_paths(p_paths);
+	}
+}
+
+PackedStringArray Scenery3D::get_data_paths() const
+{
+	return data_paths;
+}
+
 void Scenery3D::set_buildings_path(const String &p_path)
 {
 	buildings_path = p_path;
@@ -201,6 +279,45 @@ void Scenery3D::set_buildings_path(const String &p_path)
 String Scenery3D::get_buildings_path() const
 {
 	return buildings_path;
+}
+
+void Scenery3D::set_water_paths(const PackedStringArray &p_paths)
+{
+	water_paths = p_paths;
+	if (water_manager) {
+		water_manager->set_water_paths(p_paths);
+	}
+}
+
+PackedStringArray Scenery3D::get_water_paths() const
+{
+	return water_paths;
+}
+
+void Scenery3D::set_road_paths(const PackedStringArray &p_paths)
+{
+	road_paths = p_paths;
+	if (road_manager) {
+		road_manager->set_road_paths(p_paths);
+	}
+}
+
+PackedStringArray Scenery3D::get_road_paths() const
+{
+	return road_paths;
+}
+
+void Scenery3D::set_orthophoto_path(const String &p_path)
+{
+	orthophoto_path = p_path;
+	if (tile_manager) {
+		tile_manager->set_orthophoto_path(p_path);
+	}
+}
+
+String Scenery3D::get_orthophoto_path() const
+{
+	return orthophoto_path;
 }
 
 void Scenery3D::hide_building(const String &uuid)
@@ -237,6 +354,15 @@ void Scenery3D::set_origin_east(double p_east)
 	if (coords.is_valid()) {
 		coords->set_origin_east(p_east);
 	}
+	if (building_manager) {
+		building_manager->set_origin_east(p_east);
+	}
+	if (water_manager) {
+		water_manager->set_origin_east(p_east);
+	}
+	if (road_manager) {
+		road_manager->set_origin_east(p_east);
+	}
 }
 
 double Scenery3D::get_origin_east() const
@@ -255,6 +381,15 @@ void Scenery3D::set_origin_north(double p_north)
 	}
 	if (coords.is_valid()) {
 		coords->set_origin_north(p_north);
+	}
+	if (building_manager) {
+		building_manager->set_origin_north(p_north);
+	}
+	if (water_manager) {
+		water_manager->set_origin_north(p_north);
+	}
+	if (road_manager) {
+		road_manager->set_origin_north(p_north);
 	}
 }
 

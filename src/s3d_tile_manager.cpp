@@ -13,6 +13,24 @@
 
 using namespace godot;
 
+// --- Orthophoto mip path helper ---
+
+std::string S3DTileManager::ortho_path_for_tile(int ei, int ni, int lod) const
+{
+	if (orthophoto_path.is_empty()) return "";
+
+	std::string base = std::string(orthophoto_path.utf8().get_data());
+	int lv95_e = ei * tile_size;
+	int lv95_n = ni * tile_size;
+	std::string fname = "/ortho_" + std::to_string(lv95_e) + "_" + std::to_string(lv95_n) + ".jpg";
+
+	// LOD 3 = full resolution (mip0), LOD 4+ = mip2 (64px)
+	if (lod >= 4) {
+		return base + "/mip2" + fname;
+	}
+	return base + fname;
+}
+
 // --- Constructor / Destructor ---
 
 S3DTileManager::S3DTileManager()
@@ -150,16 +168,34 @@ void S3DTileManager::worker_func()
 					if (cache_it == tile_cache.end()) {
 						int lv95_east = tei * ts;
 						int lv95_north = tni * ts;
-						std::string tpath = req.base_path + "/tile_"
+						std::string tname = "/tile_"
 							+ std::to_string(lv95_east) + "_"
 							+ std::to_string(lv95_north) + ".raw";
 						std::vector<uint8_t> data;
-						std::ifstream file(tpath, std::ios::binary);
-						if (file.is_open()) {
-							data.resize(expected);
-							file.read(reinterpret_cast<char *>(data.data()), expected);
-							if ((size_t)file.gcount() != expected) data.clear();
-							file.close();
+						std::vector<uint8_t> scratch;
+						for (const auto &base : req.base_paths) {
+							std::ifstream file(base + tname, std::ios::binary);
+							if (!file.is_open()) continue;
+							scratch.resize(expected);
+							file.read(reinterpret_cast<char *>(scratch.data()), expected);
+							if ((size_t)file.gcount() != expected) {
+								scratch.clear();
+								continue;
+							}
+							if (data.empty()) {
+								data = std::move(scratch);
+								scratch.clear();
+							} else {
+								// Merge: fill zero samples from this source.
+								float *dst = reinterpret_cast<float *>(data.data());
+								const float *src = reinterpret_cast<const float *>(scratch.data());
+								size_t n = data.size() / 4;
+								for (size_t i = 0; i < n; ++i) {
+									if (dst[i] == 0.0f && src[i] != 0.0f) {
+										dst[i] = src[i];
+									}
+								}
+							}
 						}
 						tile_cache[tkey] = std::move(data);
 						cache_it = tile_cache.find(tkey);
@@ -194,20 +230,82 @@ void S3DTileManager::worker_func()
 				memcpy(result.raw_bytes.data(), composite.data(), cres * cres * 4);
 				result.success = true;
 			}
+
+			// --- Read chunk ortho JPEG tiles (mip3, 16x16 each) ---
+			if (any_data && !req.ortho_mip_dir.empty()) {
+				result.chunk_tile_count = csize;
+				for (int tdy = 0; tdy < csize; tdy++) {
+					for (int tdx = 0; tdx < csize; tdx++) {
+						int tei = base_ei + tdx;
+						int tni = base_ni + tdy;
+						int lv95_e = tei * ts;
+						int lv95_n = tni * ts;
+
+						std::string opath = req.ortho_mip_dir + "/ortho_"
+							+ std::to_string(lv95_e) + "_" + std::to_string(lv95_n) + ".jpg";
+
+						std::ifstream jpf(opath, std::ios::binary | std::ios::ate);
+						if (!jpf.is_open()) continue;
+						size_t fsize = (size_t)jpf.tellg();
+						if (fsize == 0 || fsize > 256 * 1024) continue;
+						jpf.seekg(0, std::ios::beg);
+						std::vector<uint8_t> jbuf(fsize);
+						jpf.read(reinterpret_cast<char *>(jbuf.data()), fsize);
+						if ((size_t)jpf.gcount() != fsize) continue;
+
+						int key = tdx * csize + tdy;
+						result.chunk_ortho_jpegs[key] = std::move(jbuf);
+					}
+				}
+			}
 		} else {
-			// --- Regular tile: read single file ---
+			// --- Regular tile: read single file, trying each candidate path ---
 			result.tile_size = req.tile_size;
 			result.desired_lod = req.desired_lod;
 
 			size_t expected_size = (size_t)req.tile_size * req.tile_size * 4;
-			std::ifstream file(req.path, std::ios::binary);
-			if (file.is_open()) {
-				result.raw_bytes.resize(expected_size);
-				file.read(reinterpret_cast<char *>(result.raw_bytes.data()), expected_size);
-				if ((size_t)file.gcount() == expected_size) {
+			size_t sample_count = (size_t)req.tile_size * req.tile_size;
+			std::vector<uint8_t> scratch;
+			for (const auto &candidate : req.paths) {
+				std::ifstream file(candidate, std::ios::binary);
+				if (!file.is_open()) continue;
+				scratch.resize(expected_size);
+				file.read(reinterpret_cast<char *>(scratch.data()), expected_size);
+				if ((size_t)file.gcount() != expected_size) continue;
+
+				if (!result.success) {
+					// First source: adopt it wholesale.
+					result.raw_bytes = std::move(scratch);
+					scratch.clear();
 					result.success = true;
+				} else {
+					// Subsequent sources: fill cells still at 0 from this one.
+					// Lets border tiles from adjacent datasets (e.g. CH + BW)
+					// merge seamlessly when both exist at the same LV95 index.
+					float *dst = reinterpret_cast<float *>(result.raw_bytes.data());
+					const float *src = reinterpret_cast<const float *>(scratch.data());
+					for (size_t i = 0; i < sample_count; ++i) {
+						if (dst[i] == 0.0f && src[i] != 0.0f) {
+							dst[i] = src[i];
+						}
+					}
 				}
-				file.close();
+			}
+
+			// Load orthophoto JPEG if path provided.
+			if (result.success && !req.ortho_path.empty()) {
+				std::ifstream jpf(req.ortho_path, std::ios::binary | std::ios::ate);
+				if (jpf.is_open()) {
+					size_t fsize = (size_t)jpf.tellg();
+					if (fsize > 0 && fsize < 16 * 1024 * 1024) { // sanity cap 16 MB
+						jpf.seekg(0, std::ios::beg);
+						result.jpeg_bytes.resize(fsize);
+						jpf.read(reinterpret_cast<char *>(result.jpeg_bytes.data()), fsize);
+						if ((size_t)jpf.gcount() != fsize) {
+							result.jpeg_bytes.clear();
+						}
+					}
+				}
 			}
 		}
 
@@ -270,7 +368,70 @@ void S3DTileManager::process_load_results(int &verts_generated)
 				tile->set_tile_z(result.ni);
 				// Chunk covers chunk_size * tile_size meters, not just tile_size.
 				tile->set_tile_size(tile_size * chunk_size);
-				tile->set_material(shared_material);
+
+				// Composite ortho texture from per-tile mip3 JPEGs.
+				bool ortho_applied = false;
+				if (!result.chunk_ortho_jpegs.empty() && result.chunk_tile_count > 0) {
+					int cs = result.chunk_tile_count;
+					int mip_px = 16; // mip3 pixels per tile
+					int comp_size = cs * mip_px;
+					// Create composite image. Pixel layout matches terrain UV:
+					// U=0 at west (high ei), U=1 at east (low ei)
+					// V=0 at south (low ni), V=1 at north (high ni)
+					Ref<Image> comp_img = Image::create_empty(comp_size, comp_size, false, Image::FORMAT_RGB8);
+					bool any_decoded = false;
+
+					for (auto &[tkey, jbuf] : result.chunk_ortho_jpegs) {
+						int tdx = tkey / cs; // local x (easting offset)
+						int tdy = tkey % cs; // local y (northing offset)
+
+						PackedByteArray jpkg;
+						jpkg.resize(jbuf.size());
+						memcpy(jpkg.ptrw(), jbuf.data(), jbuf.size());
+
+						Ref<Image> tile_img = Image::create_empty(1, 1, false, Image::FORMAT_RGB8);
+						Error err = tile_img->load_jpg_from_buffer(jpkg);
+						if (err != OK || tile_img->get_width() < 2) continue;
+
+						// Ensure correct format
+						if (tile_img->get_format() != Image::FORMAT_RGB8) {
+							tile_img->convert(Image::FORMAT_RGB8);
+						}
+
+						// Ortho pixel (0,0) = SE corner, cols go E→W, rows go S→N.
+						// Terrain UV: u=0 left=East side of chunk (col 0 = eastmost tile).
+						// tdx=0 is base_ei (westmost), tdx=cs-1 is eastmost.
+						// Ortho col 0 = east edge → maps to right side in UV.
+						// Composite layout: column 0 = east (low U), column comp_size-1 = west (high U).
+						// So tile tdx=cs-1 (eastmost) goes to composite col 0..mip_px-1
+						// tile tdx=0 (westmost) goes to composite col (cs-1)*mip_px.
+						int dst_col = (cs - 1 - tdx) * mip_px;
+						// tdy=0 is base_ni (south), tdy=cs-1 is north
+						// Ortho row 0 = south → composite row 0 = south (high V), row comp_size-1 = north (low V)
+						// UV V=0 at south, V=1 at north. Image row 0 = top = north.
+						// So tdy=cs-1 (north) → image row 0, tdy=0 (south) → image row (cs-1)*mip_px.
+						int dst_row = (cs - 1 - tdy) * mip_px;
+
+						int tw = tile_img->get_width();
+						int th = tile_img->get_height();
+						Rect2i src_rect(0, 0, tw < mip_px ? tw : mip_px, th < mip_px ? th : mip_px);
+						comp_img->blit_rect(tile_img, src_rect, Vector2i(dst_col, dst_row));
+						any_decoded = true;
+					}
+
+					if (any_decoded) {
+						Ref<ImageTexture> tex = ImageTexture::create_from_image(comp_img);
+						Ref<StandardMaterial3D> mat;
+						mat.instantiate();
+						mat->set_texture(StandardMaterial3D::TEXTURE_ALBEDO, tex);
+						mat->set_cull_mode(StandardMaterial3D::CULL_DISABLED);
+						tile->set_material(mat);
+						ortho_applied = true;
+					}
+				}
+				if (!ortho_applied) {
+					tile->set_material(shared_material);
+				}
 
 				int base_ei = result.ei * chunk_size;
 				int base_ni = result.ni * chunk_size;
@@ -334,7 +495,29 @@ void S3DTileManager::process_load_results(int &verts_generated)
 			tile->set_tile_x(result.ei);
 			tile->set_tile_z(result.ni);
 			tile->set_tile_size(result.tile_size);
-			tile->set_material(shared_material);
+
+			// Per-tile material: use orthophoto texture if available.
+			if (!result.jpeg_bytes.empty()) {
+				PackedByteArray jpeg_arr;
+				jpeg_arr.resize(result.jpeg_bytes.size());
+				memcpy(jpeg_arr.ptrw(), result.jpeg_bytes.data(), result.jpeg_bytes.size());
+				result.jpeg_bytes.clear();
+
+				Ref<Image> ortho_img = Image::create_empty(1, 1, false, Image::FORMAT_RGB8);
+				Error err = ortho_img->load_jpg_from_buffer(jpeg_arr);
+				if (err == OK && ortho_img->get_width() > 1) {
+					Ref<ImageTexture> tex = ImageTexture::create_from_image(ortho_img);
+					Ref<StandardMaterial3D> mat;
+					mat.instantiate();
+					mat->set_texture(StandardMaterial3D::TEXTURE_ALBEDO, tex);
+					mat->set_cull_mode(StandardMaterial3D::CULL_DISABLED);
+					tile->set_material(mat);
+				} else {
+					tile->set_material(shared_material);
+				}
+			} else {
+				tile->set_material(shared_material);
+			}
 
 			double world_x = origin_east - (double)(result.ei + 1) * tile_size;
 			double world_z = (double)result.ni * tile_size - origin_north;
@@ -391,6 +574,10 @@ void S3DTileManager::_bind_methods()
 	ClassDB::bind_method(D_METHOD("get_data_path"), &S3DTileManager::get_data_path);
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "data_path"), "set_data_path", "get_data_path");
 
+	ClassDB::bind_method(D_METHOD("set_data_paths", "paths"), &S3DTileManager::set_data_paths);
+	ClassDB::bind_method(D_METHOD("get_data_paths"), &S3DTileManager::get_data_paths);
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_STRING_ARRAY, "data_paths"), "set_data_paths", "get_data_paths");
+
 	ClassDB::bind_method(D_METHOD("set_origin_east", "east"), &S3DTileManager::set_origin_east);
 	ClassDB::bind_method(D_METHOD("get_origin_east"), &S3DTileManager::get_origin_east);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "origin_east"), "set_origin_east", "get_origin_east");
@@ -398,6 +585,10 @@ void S3DTileManager::_bind_methods()
 	ClassDB::bind_method(D_METHOD("set_origin_north", "north"), &S3DTileManager::set_origin_north);
 	ClassDB::bind_method(D_METHOD("get_origin_north"), &S3DTileManager::get_origin_north);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "origin_north"), "set_origin_north", "get_origin_north");
+
+	ClassDB::bind_method(D_METHOD("set_orthophoto_path", "path"), &S3DTileManager::set_orthophoto_path);
+	ClassDB::bind_method(D_METHOD("get_orthophoto_path"), &S3DTileManager::get_orthophoto_path);
+	ADD_PROPERTY(PropertyInfo(Variant::STRING, "orthophoto_path"), "set_orthophoto_path", "get_orthophoto_path");
 }
 
 // --- _process ---
@@ -459,16 +650,19 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 
 				int lv95_east = ei * tile_size;
 				int lv95_north = ni * tile_size;
-				String gpath = data_path + "/tile_" + itos(lv95_east) + "_" + itos(lv95_north) + ".raw";
+				String tname = "/tile_" + itos(lv95_east) + "_" + itos(lv95_north) + ".raw";
 
 				LoadRequest req;
 				req.ei = ei;
 				req.ni = ni;
 				req.key = key;
-				req.path = std::string(gpath.utf8().get_data());
+				for (int i = 0; i < data_paths.size(); i++) {
+					req.paths.push_back(std::string((data_paths[i] + tname).utf8().get_data()));
+				}
 				req.tile_size = tile_size;
 				req.desired_lod = desired_lod;
 				req.distance = dist;
+				req.ortho_path = ortho_path_for_tile(ei, ni, desired_lod);
 				new_requests.push_back(std::move(req));
 			} else {
 				// Existing tile — update desired LOD.
@@ -570,16 +764,19 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 					int ni = state.node->get_tile_z();
 					int lv95_east = ei * tile_size;
 					int lv95_north = ni * tile_size;
-					String gpath = data_path + "/tile_" + itos(lv95_east) + "_" + itos(lv95_north) + ".raw";
+					String tname = "/tile_" + itos(lv95_east) + "_" + itos(lv95_north) + ".raw";
 
 					LoadRequest req;
 					req.ei = ei;
 					req.ni = ni;
 					req.key = key;
-					req.path = std::string(gpath.utf8().get_data());
+					for (int i = 0; i < data_paths.size(); i++) {
+						req.paths.push_back(std::string((data_paths[i] + tname).utf8().get_data()));
+					}
 					req.tile_size = tile_size;
 					req.desired_lod = state.desired_lod;
 					req.distance = 0; // High priority for LOD upgrades.
+					req.ortho_path = ortho_path_for_tile(ei, ni, state.desired_lod);
 					new_requests.push_back(std::move(req));
 				}
 			}
@@ -613,9 +810,12 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 
 	std::unordered_set<uint64_t> required_chunks;
 	std::vector<LoadRequest> chunk_requests;
-	std::string base_path_str;
-	if (!data_path.is_empty()) {
-		base_path_str = std::string(data_path.utf8().get_data());
+	std::vector<std::string> base_paths_str;
+	for (int i = 0; i < data_paths.size(); i++) {
+		String p = data_paths[i];
+		if (!p.is_empty()) {
+			base_paths_str.push_back(std::string(p.utf8().get_data()));
+		}
 	}
 
 	for (int dcg_ei = -far_chunk_radius; dcg_ei <= far_chunk_radius; dcg_ei++) {
@@ -660,8 +860,11 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 				req.chunk_tile_count = chunk_size;
 				req.composite_res = CHUNK_COMPOSITE_RES;
 				req.tile_size = tile_size;
-				req.base_path = base_path_str;
+				req.base_paths = base_paths_str;
 				req.distance = min_dist;
+				if (!orthophoto_path.is_empty()) {
+					req.ortho_mip_dir = std::string(orthophoto_path.utf8().get_data()) + "/mip3";
+				}
 				chunk_requests.push_back(std::move(req));
 			}
 		}
@@ -794,12 +997,25 @@ int S3DTileManager::get_unload_margin() const
 
 void S3DTileManager::set_data_path(const String &p_path)
 {
-	data_path = p_path;
+	data_paths.clear();
+	if (!p_path.is_empty()) {
+		data_paths.push_back(p_path);
+	}
 }
 
 String S3DTileManager::get_data_path() const
 {
-	return data_path;
+	return data_paths.is_empty() ? String() : String(data_paths[0]);
+}
+
+void S3DTileManager::set_data_paths(const PackedStringArray &p_paths)
+{
+	data_paths = p_paths;
+}
+
+PackedStringArray S3DTileManager::get_data_paths() const
+{
+	return data_paths;
 }
 
 void S3DTileManager::set_origin_east(double p_east)
@@ -820,6 +1036,16 @@ void S3DTileManager::set_origin_north(double p_north)
 double S3DTileManager::get_origin_north() const
 {
 	return origin_north;
+}
+
+void S3DTileManager::set_orthophoto_path(const String &p_path)
+{
+	orthophoto_path = p_path;
+}
+
+String S3DTileManager::get_orthophoto_path() const
+{
+	return orthophoto_path;
 }
 
 void S3DTileManager::set_elevation_db(Ref<S3DElevationDB> p_db)

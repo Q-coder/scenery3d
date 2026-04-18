@@ -4,6 +4,8 @@
 #include <godot_cpp/classes/node3d.hpp>
 #include <godot_cpp/classes/ref.hpp>
 #include <godot_cpp/classes/standard_material3d.hpp>
+#include <godot_cpp/classes/image_texture.hpp>
+#include <godot_cpp/variant/packed_string_array.hpp>
 
 #include <unordered_map>
 #include <unordered_set>
@@ -49,10 +51,14 @@ namespace godot
 		struct LoadRequest {
 			int ei, ni;
 			uint64_t key;
-			std::string path;
+			// Candidate file paths tried in order (first existing/openable wins).
+			std::vector<std::string> paths;
 			int tile_size;
 			int desired_lod;
 			int distance;
+
+			// Orthophoto JPEG path (empty = no ortho for this tile).
+			std::string ortho_path;
 
 			// Chunk fields (is_chunk == true).
 			bool is_chunk = false;
@@ -60,7 +66,10 @@ namespace godot
 			int chunk_grid_ni = 0;
 			int chunk_tile_count = 0;
 			int composite_res = 0;
-			std::string base_path;
+			// Candidate base directories for chunk tile lookup.
+			std::vector<std::string> base_paths;
+			// Orthophoto mip directory for chunk compositing.
+			std::string ortho_mip_dir;
 		};
 
 		// Background file load result.
@@ -73,6 +82,12 @@ namespace godot
 			bool success = false;
 			bool is_chunk = false;
 			int composite_res = 0;
+			// Orthophoto JPEG bytes (empty = no ortho).
+			std::vector<uint8_t> jpeg_bytes;
+			// Per-tile ortho JPEGs for chunk compositing.
+			// Key: (local_x * chunk_count + local_y), value: JPEG bytes.
+			std::unordered_map<int, std::vector<uint8_t>> chunk_ortho_jpegs;
+			int chunk_tile_count = 0;
 		};
 
 		// Active tile states keyed by tile_key(ei, ni).
@@ -94,8 +109,14 @@ namespace godot
 		std::deque<LoadResult> results_queue;
 		std::atomic<bool> worker_running{false};
 
-		// Shared material for all terrain tiles.
+		// Shared material for tiles without orthophoto.
 		Ref<StandardMaterial3D> shared_material;
+
+		// Path to orthophoto directory (contains ortho_E_N.jpg + mip subdirs).
+		String orthophoto_path;
+
+		// Select appropriate mip directory based on LOD level.
+		std::string ortho_path_for_tile(int ei, int ni, int lod) const;
 
 		// Configuration.
 		int tile_size = 1024;
@@ -104,7 +125,9 @@ namespace godot
 		int chunk_size = 8;
 		int load_budget = 4;
 		int unload_margin = 2;
-		String data_path;
+		// Ordered list of directories to search for tile files.
+		// The first entry is returned by get_data_path() for backward compat.
+		PackedStringArray data_paths;
 
 		double origin_east = 2600000.0;
 		double origin_north = 1200000.0;
@@ -162,11 +185,17 @@ namespace godot
 		void set_data_path(const String &p_path);
 		String get_data_path() const;
 
+		void set_data_paths(const PackedStringArray &p_paths);
+		PackedStringArray get_data_paths() const;
+
 		void set_origin_east(double p_east);
 		double get_origin_east() const;
 
 		void set_origin_north(double p_north);
 		double get_origin_north() const;
+
+		void set_orthophoto_path(const String &p_path);
+		String get_orthophoto_path() const;
 
 		void set_elevation_db(Ref<S3DElevationDB> p_db);
 		Ref<S3DElevationDB> get_elevation_db() const;

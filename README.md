@@ -19,6 +19,8 @@ Scenery3D (Node3D)              — Main node, configuration and coordination
 ├── S3DTileManager (Node3D)     — Background thread pool, tile lifecycle, LOD rings
 │   └── S3DTile (MeshInstance3D)— Individual terrain tile with heightmap mesh
 ├── S3DBuildingManager (Node3D) — Background GLB loading, LOD, per-building visibility
+├── S3DWaterManager (Node3D)    — Water surface tiles (rivers, lakes, streams)
+├── S3DRoadManager (Node3D)     — Road and railway tiles with lane markings
 ├── S3DElevationDB (RefCounted) — Fast elevation lookup across all loaded tiles
 └── S3DCoords (RefCounted)      — WGS84 ↔ LV95/CH1903+ ↔ Godot world conversion
 ```
@@ -64,8 +66,27 @@ Default origin: E=2,600,000 / N=1,200,000 (Bern area).
 
 Designed for SwissTopo data:
 - **Terrain elevation:** swissALTI3D (0.5m resolution)
-- **Orthophotos:** SWISSIMAGE (JPEG tiles, planned)
+- **Orthophotos:** SWISSIMAGE (JPEG tiles, 1m/px full res with mip levels for LOD)
 - **Buildings:** swissBUILDINGS3D 3.0 (converted to GLB per tile)
+- **Water:** swissTLM3D rivers, lakes, and streams (ribbon meshes with vertex colors)
+- **Roads:** swissTLM3D roads and railways (ribbon meshes with white lane markings)
+
+### Orthophoto Support
+
+Aerial imagery is loaded as per-tile JPEG textures mapped via UV coordinates:
+
+| LOD Level | Texture Source | Resolution | Use case |
+|-----------|---------------|------------|----------|
+| 3 (close) | mip0 | 1024×1024 px (1 m/px) | Close-up detail |
+| 4+ (far) | mip2 | 64×64 px (16 m/px) | Distant tiles |
+| Chunks | mip3 composite | 128×128 px (8×8 tiles) | Far terrain (200km+) |
+
+Worker threads read JPEG files alongside heightmaps. Tiles without orthophotos
+fall back to flat green. Chunk composites are assembled from 16×16 px mip3 tiles
+using `blit_rect` on the main thread.
+
+Naming: `ortho_{lv95_east}_{lv95_north}.jpg` with mip subdirectories
+(`mip2/`, `mip3/`, `mip4/`) and a `manifest.json` index.
 
 ### Terrain Tile Format
 
@@ -103,6 +124,40 @@ meshes are freed when leaving detail range, reclaiming GPU RIDs. When
 re-entering detail range, the merged mesh stays visible as a placeholder until
 the detail meshes finish loading (no blink).
 
+### Water Tile Format
+
+GLB files with a single mesh containing POSITION, NORMAL, COLOR_0, and indices.
+Vertex colors distinguish rivers (blue), lakes (darker blue), and streams (lighter).
+
+- Rivers use Catmull-Rom resampled ribbon meshes for smooth curves
+- Streams overlapping river polygons are filtered via STRtree spatial indexing
+- `vertical_offset_m = 1.5` lifts water above terrain to prevent z-fighting
+- `far_radius_m = 50000` for tiles with lake polygons (visible at distance)
+- `load_radius_m = 12000` for stream-only tiles
+
+Naming: `water_{lv95_east}_{lv95_north}.glb` with `manifest.json`.
+
+### Road and Railway Tile Format
+
+GLB files with POSITION, NORMAL, COLOR_0, and indices. Vertex colors encode
+road classification:
+
+| Type | Color | Width |
+|------|-------|-------|
+| Motorway | Dark blue-grey | 14 m |
+| Main road | Medium grey | 5–10 m |
+| Secondary | Light grey | 3–6 m |
+| Minor road | Warm light grey | 1.5–4 m |
+| Railway | Dark brown | 2–4 m |
+
+Visual enhancements:
+- **White edge stripes** (24 cm wide) on motorway, main, and secondary roads
+- **White center line** on motorways (median marker)
+- **Silver rail lines** on railways (two parallel rails at 1.44 m gauge)
+- Stripe geometry offset by 5 cm above road surface to avoid z-fighting
+
+Naming: `roads_{lv95_east}_{lv95_north}.glb` with `manifest.json`.
+
 #### Conversion Script
 
 `scripts/convert_buildings.py` downloads swissBUILDINGS3D 3.0 tiles from the
@@ -122,6 +177,19 @@ python3 scripts/convert_buildings.py --download \
 
 The script requires `fiona`, `numpy`, `requests`, and `pyproj`.
 Full Switzerland: ~3,218 tiles, ~2.5M buildings, ~300 MB GLB.
+
+#### Baden-Württemberg Terrain
+
+`tools/convert_lgl_bw.py` converts LGL Baden-Württemberg DGM GeoTIFFs (EPSG:25832)
+to the scenery3d tile format (LV95, headerless float32). Handles NaN-aware merging
+for border tiles where Swiss and German data overlap.
+
+```bash
+python3 tools/convert_lgl_bw.py \
+  --input /path/to/bw_dgm/ \
+  --output /path/to/scenery/Germany/Baden-Wuertemberg/terrain \
+  --src-crs EPSG:25832
+```
 
 ## Building
 

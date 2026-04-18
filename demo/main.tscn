@@ -13,15 +13,20 @@ ambient_light_energy = 0.6
 
 [node name="Scenery3D" type="Scenery3D" parent="." unique_id=806723349]
 load_radius = 50
-data_path = "/Users/gery/code/provpilot/scenery/terrain"
+data_path = "/Users/gery/provpilot/scenery/Switzerland/terrain"
+data_paths = PackedStringArray("/Users/gery/provpilot/scenery/Switzerland/terrain", "/Users/gery/provpilot/scenery/Germany/Baden-Wuertemberg/terrain")
+buildings_path = "/Users/gery/provpilot/scenery/Switzerland/buildings"
+water_paths = PackedStringArray("/Users/gery/code/provpilot/scenery/water")
+road_paths = PackedStringArray("/Users/gery/provpilot/scenery/Switzerland/roads")
+orthophoto_path = "/Users/gery/provpilot/scenery/Switzerland/orthophoto"
 
 [node name="Camera3D" type="Camera3D" parent="." unique_id=1436725578]
-transform = Transform3D(0.9907549451641002, 0.03704559282108246, -0.13050771121054594, 0, 0.9619943601474612, 0.27306931545758983, 0.13566369681267235, -0.2705447746621828, 0.9531006695360716, 5.567732632686592, 1333.1094546210286, 2000)
+transform = Transform3D(-1, 0, 0, 0, 0.9619943601474612, 0.27306931545758983, 0, 0.27306931545758983, -0.9619943601474612, -90000, 1500, 83000)
 far = 200000.0
 script = ExtResource("1")
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1798709995]
-transform = Transform3D(-0.9067090878784128, -0.00450059559769544, 0.4217325865971976, -0.38032671623367076, -0.42347013304864833, -0.8222071730012289, 0.18229157654046885, -0.9058988856682768, 0.3822525213355228, 3.1007556839506236, 1234.9965087822245, -436.0637471623301)
+transform = Transform3D(-0.9067090878784128, -0.00450059559769544, 0.4217325865971976, -0.3803267162336707, -0.42347013304864833, -0.8222071730012289, 0.18229157654046885, -0.9058988856682768, 0.3822525213355228, 3.1007556839506236, 1234.9965087822245, -436.0637471623301)
 light_energy = 0.8
 shadow_enabled = true
 directional_shadow_max_distance = 10000.0
