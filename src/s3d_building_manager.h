@@ -94,6 +94,12 @@ namespace godot
 		// Loaded manifest.
 		std::unordered_map<std::string, ManifestEntry> manifest;
 		bool manifest_loaded = false;
+		// Origin used by the building tile vertices (read from manifest).
+		// Tile root nodes are offset by (origin_east - manifest_origin_e,
+		// 0, manifest_origin_n - origin_north) so they end up at the right
+		// place in world coordinates regardless of the runtime origin.
+		double manifest_origin_e = 2600000.0;
+		double manifest_origin_n = 1200000.0;
 
 		// Active tile states keyed by tile_id.
 		std::unordered_map<std::string, TileState> tiles;

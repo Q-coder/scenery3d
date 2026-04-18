@@ -176,6 +176,7 @@ void Scenery3D::_ready()
 		add_child(road_manager);
 		road_manager->set_origin_east(origin_east);
 		road_manager->set_origin_north(origin_north);
+		road_manager->set_elevation_db(elevation_db);
 		road_manager->set_road_paths(road_paths);
 	}
 }

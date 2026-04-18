@@ -398,6 +398,9 @@ void S3DBuildingManager::load_manifest()
 		return;
 	}
 
+	manifest_origin_e = root.get_double("origin_e", 2600000.0);
+	manifest_origin_n = root.get_double("origin_n", 1200000.0);
+
 	manifest.clear();
 	for (auto &[key, val] : tiles_obj->obj_fields) {
 		ManifestEntry entry;
@@ -674,6 +677,9 @@ void S3DBuildingManager::process_load_results()
 			Node3D *root = memnew(Node3D);
 			root->set_name(String("buildings_") + String(result.tile_id.c_str()));
 			add_child(root);
+			double dx = origin_east - manifest_origin_e;
+			double dz = manifest_origin_n - origin_north;
+			root->set_position(Vector3((float)dx, 0.0f, (float)dz));
 			state.root_node = root;
 
 			for (auto &bld_data : result.buildings) {
@@ -746,6 +752,9 @@ void S3DBuildingManager::process_load_results()
 					far_mi->set_mesh(far_mesh);
 					far_mi->set_visible(false);
 					add_child(far_mi);
+					double dx = origin_east - manifest_origin_e;
+					double dz = manifest_origin_n - origin_north;
+					far_mi->set_position(Vector3((float)dx, 0.0f, (float)dz));
 					state.far_lod_node = far_mi;
 				}
 			}

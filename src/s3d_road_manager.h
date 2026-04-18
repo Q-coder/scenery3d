@@ -7,6 +7,8 @@
 #include <godot_cpp/classes/standard_material3d.hpp>
 #include <godot_cpp/classes/ref.hpp>
 
+#include "s3d_elevation_db.h"
+
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -98,7 +100,12 @@ namespace godot
 		double origin_north = 1200000.0;
 		int load_radius_m = 12000;
 		int unload_margin_m = 2000;
-		double vertical_offset_m = 2.0;
+		double vertical_offset_m = 0.4;
+
+		// Optional elevation DB: when set, road vertices are re-draped onto
+		// the terrain heightmap at load time to remove DTM-mismatch gaps
+		// between the baked road elevation and the rendered terrain.
+		Ref<S3DElevationDB> elevation_db;
 
 		// Last known camera position in LV95.
 		double last_cam_e = 0;
@@ -140,6 +147,8 @@ namespace godot
 
 		void set_vertical_offset_m(double p_offset);
 		double get_vertical_offset_m() const;
+
+		void set_elevation_db(const Ref<S3DElevationDB> &p_db) { elevation_db = p_db; }
 
 		int get_active_tile_count() const;
 	};
