@@ -111,7 +111,10 @@ double S3DElevationDB::get_elevation(double x, double z) const
 
 	uint64_t key = _tile_key(tile_x, tile_z);
 	if (!tiles.has(key)) {
-		return 0.0;
+		// No heightmap loaded for this tile yet. Return NaN so callers can
+		// distinguish "no data" from a legitimate sea-level elevation of 0.
+		// get_elevation_safe() can be used for a numeric fallback.
+		return std::nan("");
 	}
 
 	const TileData &td = tiles[key];
@@ -123,7 +126,12 @@ double S3DElevationDB::get_elevation(double x, double z) const
 	double local_z = lv95_n - (double)tile_z * tile_size;
 
 	// Convert to pixel coordinates.
-	double px = local_x / tile_size * (w - 1);
+	// Heightmap convention (per data manifest):
+	//   pixel (0,0) = SE corner of the Swiss tile,
+	//   columns go East → West, rows go South → North.
+	// So local_x=0 (west edge in LV95) → pixel col w-1, and
+	// local_x=tile_size (east edge) → pixel col 0.
+	double px = (1.0 - local_x / tile_size) * (w - 1);
 	double pz = local_z / tile_size * (h - 1);
 
 	// Bilinear interpolation indices.

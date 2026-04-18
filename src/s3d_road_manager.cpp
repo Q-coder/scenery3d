@@ -569,6 +569,26 @@ void S3DRoadManager::process_load_results()
 			}
 		}
 
+		// Drape the road onto the terrain. The road GLBs carry their own
+		// baked Y from whatever DTM was used at generation time, which can
+		// differ from the heightmap the terrain mesh is built from and
+		// produces visible gaps/clipping. Re-sample elevation at each
+		// vertex's world XZ so the road always sits flush on the current
+		// terrain. The small vertical_offset_m keeps roads just above
+		// terrain to avoid z-fighting.
+		if (elevation_db.is_valid()) {
+			PackedVector3Array &verts = result.surface.vertices;
+			int vn = verts.size();
+			for (int i = 0; i < vn; i++) {
+				Vector3 v = verts[i];
+				double world_x = (double)v.x + dx;
+				double world_z = (double)v.z + dz;
+				double h = elevation_db->get_elevation(world_x, world_z);
+				v.y = (float)(h + vertical_offset_m);
+				verts[i] = v;
+			}
+		}
+
 		Array arrays;
 		arrays.resize(Mesh::ARRAY_MAX);
 		arrays[Mesh::ARRAY_VERTEX] = result.surface.vertices;
@@ -588,7 +608,11 @@ void S3DRoadManager::process_load_results()
 		MeshInstance3D *mi = memnew(MeshInstance3D);
 		mi->set_name(String("road_") + String(result.tile_id.c_str()));
 		mi->set_mesh(mesh);
-		mi->set_position(Vector3((float)dx, (float)vertical_offset_m, (float)dz));
+		// When vertices are draped, they already carry absolute ASL Y, so the
+		// root node sits at y=0. Without elevation_db, keep the legacy fixed
+		// offset for backward compatibility.
+		float root_y = elevation_db.is_valid() ? 0.0f : (float)vertical_offset_m;
+		mi->set_position(Vector3((float)dx, root_y, (float)dz));
 		add_child(mi);
 
 		state.node = mi;
