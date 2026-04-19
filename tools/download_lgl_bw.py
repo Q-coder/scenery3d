@@ -20,6 +20,12 @@ Restrict to a UTM32 km bounding box (E_min N_min E_max N_max):
   python tools/download_lgl_bw.py --extent 456 5282 468 5296 \\
       --download-dir ...  --output ...
 
+Re-fetch only the cells reported as missing by find_missing_bw_tiles.py:
+  python tools/find_missing_bw_tiles.py --terrain-dir /path/to/terrain \\
+      --probe-server --output-cells missing.txt
+  python tools/download_lgl_bw.py --cells-file missing.txt \\
+      --download-dir ...  --output ...
+
 Skip the conversion step (just download + extract):
   python tools/download_lgl_bw.py --no-convert --download-dir ...
 
@@ -215,6 +221,13 @@ def main() -> int:
                         metavar=("E_MIN", "N_MIN", "E_MAX", "N_MAX"),
                         default=DEFAULT_EXTENT,
                         help=f"UTM32 bounding box in km (default: full BW {DEFAULT_EXTENT}).")
+    parser.add_argument("--cells-file",
+                        help="Restrict to a specific set of (E_km N_km) cells "
+                             "listed one per line (extra columns ignored, "
+                             "'#' comments ignored). Skips bbox enumeration "
+                             "and still HEAD-probes each listed cell so "
+                             "sizes/availability are known before download. "
+                             "Produced e.g. by tools/find_missing_bw_tiles.py.")
     parser.add_argument("--probe-workers", type=int, default=32,
                         help="HEAD-probe parallelism (default: 32).")
     parser.add_argument("--download-workers", type=int, default=8,
@@ -232,11 +245,29 @@ def main() -> int:
 
     download_dir = Path(args.download_dir).expanduser().resolve()
 
-    # 1) Enumerate candidate tiles in the bounding box.
-    print(f"[1/4] Enumerating 2 km cells in UTM32 extent "
-          f"E [{args.extent[0]}, {args.extent[2]}] × N [{args.extent[1]}, {args.extent[3]}]")
-    cells = enumerate_candidates(tuple(args.extent))
-    print(f"      {len(cells)} candidate cells")
+    # 1) Enumerate candidate tiles (either from --cells-file or the bbox).
+    if args.cells_file:
+        cells_path = Path(args.cells_file).expanduser()
+        cells: list[tuple[int, int]] = []
+        with cells_path.open() as f:
+            for line in f:
+                line = line.split("#", 1)[0].strip()
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                try:
+                    cells.append((int(parts[0]), int(parts[1])))
+                except ValueError:
+                    continue
+        cells = sorted(set(cells))
+        print(f"[1/4] Loaded {len(cells)} cells from {cells_path}")
+    else:
+        print(f"[1/4] Enumerating 2 km cells in UTM32 extent "
+              f"E [{args.extent[0]}, {args.extent[2]}] × N [{args.extent[1]}, {args.extent[3]}]")
+        cells = enumerate_candidates(tuple(args.extent))
+        print(f"      {len(cells)} candidate cells")
 
     # 2) HEAD-probe the portal to find the ones that actually exist.
     print(f"[2/4] Probing availability with {args.probe_workers} workers")

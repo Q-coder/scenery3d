@@ -584,6 +584,7 @@ void S3DRoadManager::process_load_results()
 				double world_x = (double)v.x + dx;
 				double world_z = (double)v.z + dz;
 				double h = elevation_db->get_elevation(world_x, world_z);
+				if (std::isnan(h)) h = (double)v.y; // keep original if no terrain
 				v.y = (float)(h + vertical_offset_m);
 				verts[i] = v;
 			}

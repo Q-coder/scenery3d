@@ -45,10 +45,21 @@ Beyond `load_radius`, terrain is rendered as low-resolution chunks. Each chunk
 composites an 8×8 group of tiles into a single 33×33 vertex mesh, covering
 8192×8192 meters. This extends visibility to `far_radius` (default 200 tiles = 200km).
 
-Chunk lifecycle uses seamless handoffs:
-- A chunk is only removed when ALL individual tiles covering it are fully loaded
-- An individual tile beyond `load_radius` is only removed when its covering chunk is loaded
-- Hysteresis margin (`unload_margin`, default 2 tiles) prevents thrashing at boundaries
+Chunk compositing block-averages raw source pixels into each of the 33×33 cells
+and treats the tile's zero pixels as nodata, gap-filling them first — so a
+chunk is classified as empty only when literally every underlying pixel is zero.
+
+Chunk lifecycle:
+- A chunk is removed as soon as its footprint is fully inside the individual-tile
+  ring; the closest-first tile load queue guarantees near tiles stream in fast.
+- An individual tile beyond `load_radius` is only removed when its covering chunk
+  is loaded.
+- Chunk meshes are rendered at a constant Y offset (`CHUNK_Y_BIAS = -30 m`) so
+  wherever they overlap an individual tile the near terrain wins the depth test.
+  This eliminates ridgeline Z-fighting caused by the 250 m chunk sampling poking
+  above the 1 m tile mesh.
+- Hysteresis margin (`unload_margin`, default 2 tiles) prevents thrashing at the
+  far-range boundary.
 
 ### Coordinate Convention
 
@@ -182,13 +193,54 @@ Full Switzerland: ~3,218 tiles, ~2.5M buildings, ~300 MB GLB.
 
 `tools/convert_lgl_bw.py` converts LGL Baden-Württemberg DGM GeoTIFFs (EPSG:25832)
 to the scenery3d tile format (LV95, headerless float32). Handles NaN-aware merging
-for border tiles where Swiss and German data overlap.
+for border tiles where Swiss and German data overlap. Tiles whose real-source
+coverage is below `--min-valid-fraction` (default 0.5) are skipped rather than
+being streak-filled from a few pixels, which prevents visible seams against
+fully-covered neighbours.
 
 ```bash
 python3 tools/convert_lgl_bw.py \
   --input /path/to/bw_dgm/ \
   --output /path/to/scenery/Germany/Baden-Wuertemberg/terrain \
   --src-crs EPSG:25832
+```
+
+`tools/download_lgl_bw.py` automates the full pipeline: HEAD-probe the LGL Open
+GeoData Portal, download every DGM1 ZIP in a UTM32 bbox, extract the XYZ files
+and invoke the converter. Idempotent — already-present ZIPs and extracted
+tiles are skipped.
+
+```bash
+python3 tools/download_lgl_bw.py \
+  --download-dir /path/to/scenery_in \
+  --output       /path/to/scenery/Germany/Baden-Wuertemberg/terrain
+```
+
+`tools/find_missing_bw_tiles.py` finds gaps in an existing BW terrain directory
+and maps them back to the LGL 2 km source cells that would cover them. Useful
+after you've deleted the source data to identify exactly which ZIPs still need
+to be re-downloaded. Writes a cell list that `download_lgl_bw.py --cells-file`
+can consume directly. Also has a `--check-quality` mode that flags (and
+optionally deletes) existing `.raw` tiles whose non-zero pixel coverage is
+below a threshold — these are the partial tiles that cause streaking seams in
+the rendered terrain.
+
+```bash
+# 1. Delete bad / streaky tiles
+python3 tools/find_missing_bw_tiles.py \
+  --terrain-dir /path/to/terrain \
+  --shrink 2 --check-quality --delete-bad
+
+# 2. Find gaps and probe the LGL server
+python3 tools/find_missing_bw_tiles.py \
+  --terrain-dir /path/to/terrain \
+  --shrink 2 --probe-server --output-cells /tmp/missing.txt
+
+# 3. Re-download only the missing cells
+python3 tools/download_lgl_bw.py \
+  --cells-file /tmp/missing.txt \
+  --download-dir /path/to/scenery_in \
+  --output      /path/to/terrain
 ```
 
 ## Building
