@@ -137,7 +137,7 @@ void S3DTileManager::worker_func()
 			result.tile_size = csize * ts;
 			result.desired_lod = 0;
 
-			std::vector<float> composite(cres * cres, 0.0f);
+			std::vector<float> composite(cres * cres, NAN);
 			bool any_data = false;
 
 			// Cache tile data to avoid re-reading the same file.
@@ -197,31 +197,116 @@ void S3DTileManager::worker_func()
 								}
 							}
 						}
+						// Gap-fill the freshly loaded tile before sampling: the
+						// raw data from the BW / SwissTopo pipeline can contain
+						// rows/columns of zero (water, nodata) that are wider
+						// than the 33×33 composite's 3×3 neighbourhood fill can
+						// bridge. Use the same 4-pass row/col sweep the regular
+						// tile path uses, so every sampled pixel comes back
+						// with a plausible elevation.
+						if (!data.empty()) {
+							float *d = reinterpret_cast<float *>(data.data());
+							int sz = ts;
+							for (int r = 0; r < sz; r++) {
+								float last = 0.0f;
+								for (int c = 0; c < sz; c++) {
+									float &v = d[r * sz + c];
+									if (v != 0.0f) last = v;
+									else if (last != 0.0f) v = last;
+								}
+								last = 0.0f;
+								for (int c = sz - 1; c >= 0; c--) {
+									float &v = d[r * sz + c];
+									if (v != 0.0f) last = v;
+									else if (last != 0.0f) v = last;
+								}
+							}
+							for (int c = 0; c < sz; c++) {
+								float last = 0.0f;
+								for (int r = 0; r < sz; r++) {
+									float &v = d[r * sz + c];
+									if (v != 0.0f) last = v;
+									else if (last != 0.0f) v = last;
+								}
+								last = 0.0f;
+								for (int r = sz - 1; r >= 0; r--) {
+									float &v = d[r * sz + c];
+									if (v != 0.0f) last = v;
+									else if (last != 0.0f) v = last;
+								}
+							}
+						}
 						tile_cache[tkey] = std::move(data);
 						cache_it = tile_cache.find(tkey);
 					}
 
 					if (cache_it->second.empty()) continue;
 
-					// Sample pixel from raw tile.
-					// Raw: pixel(0,0) = SE, col goes E→W, row goes S→N.
+					// Block-average sample from the raw tile. Each composite
+					// cell covers (ts / (cres-1)) source pixels per axis, so
+					// we average a small kx×ky grid within that block rather
+					// than picking a single pixel. This is robust against
+					// isolated zero / nodata pixels that slip past the
+					// per-tile gap-fill above, and dramatically reduces the
+					// chance of a whole chunk being classified as empty.
+					const float *tile_f = reinterpret_cast<const float *>(cache_it->second.data());
 					double local_e = lv95_e - (double)tei * ts;
 					double local_n = lv95_n - (double)tni * ts;
 
-					// col 0 = east edge (local_e = ts), col ts-1 = west edge (local_e = 0)
-					int pcol = (int)std::round((ts - local_e) / ts * (ts - 1));
-					// row 0 = south edge (local_n = 0), row ts-1 = north edge (local_n = ts)
-					int prow = (int)std::round(local_n / ts * (ts - 1));
+					int pcol_c = (int)std::round((ts - local_e) / ts * (ts - 1));
+					int prow_c = (int)std::round(local_n / ts * (ts - 1));
+					pcol_c = std::max(0, std::min(ts - 1, pcol_c));
+					prow_c = std::max(0, std::min(ts - 1, prow_c));
 
-					pcol = std::max(0, std::min(ts - 1, pcol));
-					prow = std::max(0, std::min(ts - 1, prow));
+					// Supersampling window: ±K pixels around the nominal
+					// sample, clamped to the tile. K ≈ half a composite step
+					// (ts / (cres-1) / 2), capped to keep cost bounded.
+					int half = std::min(8, (int)(ts / (cres - 1) / 2));
 
-					size_t offset = ((size_t)prow * ts + pcol) * 4;
-					float height;
-					memcpy(&height, &cache_it->second[offset], 4);
+					float sum = 0.0f;
+					int cnt = 0;
+					for (int dy = -half; dy <= half; dy++) {
+						int pr = prow_c + dy;
+						if (pr < 0 || pr >= ts) continue;
+						for (int dx = -half; dx <= half; dx++) {
+							int pc = pcol_c + dx;
+							if (pc < 0 || pc >= ts) continue;
+							float v = tile_f[(size_t)pr * ts + pc];
+							if (v != 0.0f) { sum += v; cnt++; }
+						}
+					}
+					if (cnt > 0) {
+						composite[cy * cres + cx] = sum / (float)cnt;
+						any_data = true;
+					}
+				}
+			}
 
-					composite[cy * cres + cx] = height;
-					any_data = true;
+			// Fill NaN gaps by propagating nearest valid elevation.
+			if (any_data) {
+				for (int pass = 0; pass < cres; pass++) {
+					bool changed = false;
+					std::vector<float> prev = composite;
+					for (int i = 0; i < cres * cres; i++) {
+						if (!std::isnan(prev[i])) continue;
+						int cy = i / cres, cx = i % cres;
+						float sum = 0; int cnt = 0;
+						for (int dy = -1; dy <= 1; dy++) {
+							for (int dx = -1; dx <= 1; dx++) {
+								int ny = cy + dy, nx = cx + dx;
+								if (ny >= 0 && ny < cres && nx >= 0 && nx < cres) {
+									float v = prev[ny * cres + nx];
+									if (!std::isnan(v)) { sum += v; cnt++; }
+								}
+							}
+						}
+						if (cnt > 0) { composite[i] = sum / cnt; changed = true; }
+					}
+					if (!changed) break;
+				}
+				// Any remaining NaN → 0 (shouldn't happen if chunk has data).
+				for (auto &v : composite) {
+					if (std::isnan(v)) v = 0.0f;
 				}
 			}
 
@@ -288,6 +373,48 @@ void S3DTileManager::worker_func()
 						if (dst[i] == 0.0f && src[i] != 0.0f) {
 							dst[i] = src[i];
 						}
+					}
+				}
+			}
+
+			// Fill remaining zero-elevation gaps (nodata from BW DGM etc.)
+			// by propagating from nearest valid neighbours.  The raw tile
+			// is 1024×1024; a full flood-fill would be expensive, so we
+			// do a simple 4-pass sweep (→, ←, ↓, ↑) that copies the
+			// previous valid sample along each scanline direction.
+			if (result.success) {
+				float *d = reinterpret_cast<float *>(result.raw_bytes.data());
+				int sz = req.tile_size;
+				// Horizontal passes (row-wise).
+				for (int r = 0; r < sz; r++) {
+					// Left to right.
+					float last = 0.0f;
+					for (int c = 0; c < sz; c++) {
+						float &v = d[r * sz + c];
+						if (v != 0.0f) last = v;
+						else if (last != 0.0f) v = last;
+					}
+					// Right to left.
+					last = 0.0f;
+					for (int c = sz - 1; c >= 0; c--) {
+						float &v = d[r * sz + c];
+						if (v != 0.0f) last = v;
+						else if (last != 0.0f) v = last;
+					}
+				}
+				// Vertical passes (column-wise) for remaining gaps.
+				for (int c = 0; c < sz; c++) {
+					float last = 0.0f;
+					for (int r = 0; r < sz; r++) {
+						float &v = d[r * sz + c];
+						if (v != 0.0f) last = v;
+						else if (last != 0.0f) v = last;
+					}
+					last = 0.0f;
+					for (int r = sz - 1; r >= 0; r--) {
+						float &v = d[r * sz + c];
+						if (v != 0.0f) last = v;
+						else if (last != 0.0f) v = last;
 					}
 				}
 			}
@@ -399,18 +526,13 @@ void S3DTileManager::process_load_results(int &verts_generated)
 						}
 
 						// Ortho pixel (0,0) = SE corner, cols go E→W, rows go S→N.
-						// Terrain UV: u=0 left=East side of chunk (col 0 = eastmost tile).
+						// Terrain UV: u=0 at east edge, v=0 at south edge.
+						// Image row 0 = top = UV v=0 = south.
 						// tdx=0 is base_ei (westmost), tdx=cs-1 is eastmost.
-						// Ortho col 0 = east edge → maps to right side in UV.
-						// Composite layout: column 0 = east (low U), column comp_size-1 = west (high U).
-						// So tile tdx=cs-1 (eastmost) goes to composite col 0..mip_px-1
-						// tile tdx=0 (westmost) goes to composite col (cs-1)*mip_px.
+						// Composite col 0 = east (u=0) → eastmost tile (tdx=cs-1).
 						int dst_col = (cs - 1 - tdx) * mip_px;
-						// tdy=0 is base_ni (south), tdy=cs-1 is north
-						// Ortho row 0 = south → composite row 0 = south (high V), row comp_size-1 = north (low V)
-						// UV V=0 at south, V=1 at north. Image row 0 = top = north.
-						// So tdy=cs-1 (north) → image row 0, tdy=0 (south) → image row (cs-1)*mip_px.
-						int dst_row = (cs - 1 - tdy) * mip_px;
+						// tdy=0 is base_ni (south) → image row 0 (top, v=0).
+						int dst_row = tdy * mip_px;
 
 						int tw = tile_img->get_width();
 						int th = tile_img->get_height();
@@ -437,7 +559,11 @@ void S3DTileManager::process_load_results(int &verts_generated)
 				int base_ni = result.ni * chunk_size;
 				double world_x = origin_east - (double)(base_ei + chunk_size) * tile_size;
 				double world_z = (double)base_ni * tile_size - origin_north;
-				tile->set_position(Vector3(world_x, 0.0, world_z));
+				// Sink chunks slightly below individual tiles so where the
+				// two overlap the near terrain wins the depth test cleanly.
+				// Chunks sample every ~250 m so their surface can otherwise
+				// protrude above the detailed tile mesh along ridgelines.
+				tile->set_position(Vector3(world_x, CHUNK_Y_BIAS, world_z));
 
 				add_child(tile);
 				state.node = tile;
@@ -871,8 +997,11 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 	}
 
 	// Unload out-of-range chunks (with hysteresis margin).
-	// For chunks entering the individual-tile zone, only remove once the
-	// individual tiles covering them are actually loaded (no gaps).
+	// A chunk is removed as soon as its footprint is fully inside the
+	// individual-tile ring — the chunk Y-bias keeps any transient gap
+	// invisible (individual tiles always depth-win where loaded, and the
+	// sky underneath is masked by the chunk mesh that's still rendering
+	// below while tiles stream in).
 	int chunk_unload_far = far_radius + unload_margin;
 	std::vector<uint64_t> chunks_to_remove;
 	for (auto &[key, state] : chunks) {
@@ -883,33 +1012,16 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 		int closest_ei = std::max(base_ei, std::min(cam_ei, base_ei + chunk_size - 1));
 		int closest_ni = std::max(base_ni, std::min(cam_ni, base_ni + chunk_size - 1));
 		int min_dist = std::max(std::abs(closest_ei - cam_ei), std::abs(closest_ni - cam_ni));
-		// Max distance: farthest tile in chunk from camera.
 		int max_dei = std::max(std::abs(base_ei - cam_ei), std::abs(base_ei + chunk_size - 1 - cam_ei));
 		int max_dni = std::max(std::abs(base_ni - cam_ni), std::abs(base_ni + chunk_size - 1 - cam_ni));
 		int max_dist_in_chunk = std::max(max_dei, max_dni);
 		if (min_dist > chunk_unload_far) {
 			chunks_to_remove.push_back(key);
 		} else if (max_dist_in_chunk <= max_radius) {
-			// Chunk fully inside individual tile zone — only remove if all
-			// overlapping tile positions are loaded (not still loading).
-			bool all_covered = true;
-			for (int dei = 0; dei < chunk_size && all_covered; dei++) {
-				for (int dni = 0; dni < chunk_size && all_covered; dni++) {
-					int tei = base_ei + dei;
-					int tni = base_ni + dni;
-					int tdist = std::max(std::abs(tei - cam_ei), std::abs(tni - cam_ni));
-					if (tdist <= max_radius) {
-						uint64_t tkey = tile_key(tei, tni);
-						auto it = tiles.find(tkey);
-						if (it == tiles.end() || it->second.loading || !it->second.node) {
-							all_covered = false;
-						}
-					}
-				}
-			}
-			if (all_covered) {
-				chunks_to_remove.push_back(key);
-			}
+			// Chunk fully inside individual tile zone — drop it; the
+			// closest-first tile queue will have those tiles loading
+			// already, and the chunk Y-bias hides any momentary gap.
+			chunks_to_remove.push_back(key);
 		}
 	}
 	for (uint64_t key : chunks_to_remove) {

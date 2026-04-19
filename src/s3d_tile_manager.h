@@ -141,6 +141,12 @@ namespace godot
 		// Resolution of chunk composite heightmaps.
 		static constexpr int CHUNK_COMPOSITE_RES = 33;
 
+		// Y offset (metres) applied to chunk meshes so they sit just below
+		// the individual-tile surface and lose the depth test wherever the
+		// two overlap. Large enough to cover the error from 250 m chunk
+		// sampling vs 1 m tile sampling on typical terrain.
+		static constexpr double CHUNK_Y_BIAS = -30.0;
+
 		Ref<S3DElevationDB> elevation_db;
 
 		static inline uint64_t tile_key(int tx, int tz) {

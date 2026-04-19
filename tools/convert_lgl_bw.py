@@ -108,12 +108,15 @@ def render_tile(
     tz: int,
     tile_size: int,
     samples: int,
+    min_valid_fraction: float = 0.5,
 ) -> np.ndarray | None:
     """Render a single LV95 tile by reading from all overlapping sources.
 
     Returns an (samples, samples) float32 array in the native Scenery3D
     orientation (row 0 = south edge, col 0 = east edge), or None if no
-    source overlaps this tile with real data.
+    source overlaps this tile with real data, or if post-fill coverage
+    is below `min_valid_fraction` (tile is mostly synthesised and would
+    produce visible streaking at the seam with neighbouring tiles).
     """
     e_min, n_min, e_max, n_max = tile_bounds(tx, tz, tile_size)
 
@@ -161,6 +164,12 @@ def render_tile(
     elif not mask.any():
         return None  # nothing valid at all
     else:
+        # Reject tiles whose real source coverage is too sparse: even with
+        # inpainting, the result is a patchwork that creates visible seams
+        # against neighbouring, fully-covered tiles.
+        valid_fraction = float(mask.sum()) / mask.size
+        if valid_fraction < min_valid_fraction:
+            return None
         dst = fillnodata(dst, mask=mask, max_search_distance=100.0,
                          smoothing_iterations=0)
         # After fillnodata, any still-NaN cell is beyond max_search_distance;
@@ -192,6 +201,13 @@ def main() -> int:
                         help="LV95 bounding box to convert (default: full source extent).")
     parser.add_argument("--pattern", default="*.tif,*.tiff,*.asc,*.xyz,*.vrt",
                         help="Comma-separated glob patterns when --input is a directory (recursive).")
+    parser.add_argument("--min-valid-fraction", type=float, default=0.5,
+                        help="Minimum fraction of a tile's pixels that must "
+                             "come from real source data (before inpainting) "
+                             "for the tile to be written. Tiles below this "
+                             "would stretch sparse data across the whole "
+                             "footprint and cause seams against full tiles. "
+                             "Default: 0.5.")
     args = parser.parse_args()
 
     tile_size = args.tile_size
@@ -242,7 +258,8 @@ def main() -> int:
     skipped = 0
     for tz in range(tz_min, tz_max + 1):
         for tx in range(tx_min, tx_max + 1):
-            data = render_tile(sources, tx, tz, tile_size, samples)
+            data = render_tile(sources, tx, tz, tile_size, samples,
+                               min_valid_fraction=args.min_valid_fraction)
             if data is None:
                 skipped += 1
                 continue
