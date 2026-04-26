@@ -62,8 +62,9 @@ namespace godot
 			int desired_lod;
 			int distance;
 
-			// Orthophoto JPEG path (empty = no ortho for this tile).
-			std::string ortho_path;
+			// Orthophoto JPEG candidate paths (worker tries in order, first
+			// openable wins). Empty = no ortho for this tile.
+			std::vector<std::string> ortho_paths;
 			// Target in-memory ortho texture size in pixels (-1 if no ortho).
 			int ortho_pixels = -1;
 
@@ -75,8 +76,9 @@ namespace godot
 			int composite_res = 0;
 			// Candidate base directories for chunk tile lookup.
 			std::vector<std::string> base_paths;
-			// Orthophoto mip directory for chunk compositing.
-			std::string ortho_mip_dir;
+			// Orthophoto mip directories for chunk compositing
+			// (one per orthophoto root; first existing JPEG per sub-tile wins).
+			std::vector<std::string> ortho_mip_dirs;
 		};
 
 		// Background file load result.
@@ -121,11 +123,15 @@ namespace godot
 		// Shared material for tiles without orthophoto.
 		Ref<StandardMaterial3D> shared_material;
 
-		// Path to orthophoto directory (contains ortho_E_N.jpg + mip subdirs).
-		String orthophoto_path;
+		// Ordered list of orthophoto root directories (each contains
+		// ortho_E_N.jpg + mip subdirs). Worker tries each in order; the
+		// first existing file wins. Lets CH SWISSIMAGE and DE LGL DOP20
+		// coexist seamlessly across the border.
+		PackedStringArray orthophoto_paths;
 
-		// Select appropriate mip directory based on LOD level.
-		std::string ortho_path_for_tile(int ei, int ni, int lod) const;
+		// Build the list of candidate ortho file paths (one per data root)
+		// for a given tile + LOD. Worker tries them in order.
+		std::vector<std::string> ortho_paths_for_tile(int ei, int ni, int lod) const;
 
 		// Configuration.
 		int tile_size = 1024;
@@ -222,8 +228,12 @@ namespace godot
 		void set_origin_north(double p_north);
 		double get_origin_north() const;
 
+		// Backward-compat single-path setters: route through orthophoto_paths.
 		void set_orthophoto_path(const String &p_path);
 		String get_orthophoto_path() const;
+
+		void set_orthophoto_paths(const PackedStringArray &p_paths);
+		PackedStringArray get_orthophoto_paths() const;
 
 		void set_elevation_db(Ref<S3DElevationDB> p_db);
 		Ref<S3DElevationDB> get_elevation_db() const;
