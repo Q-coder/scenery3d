@@ -15,6 +15,28 @@ using namespace godot;
 
 // --- Orthophoto mip path helper ---
 
+int S3DTileManager::ortho_mip_for_lod(int lod)
+{
+	// On-disk mip level chosen for a given tile LOD:
+	//   LOD ≤ 6 → mip0 (1024 px on disk). For LOD 5–6 the in-memory image
+	//             is downsampled to 256 px after decoding (see process_load_results)
+	//             so GPU memory stays bounded while mid-distance tiles still
+	//             look sharp (4 m/px instead of 16 m/px).
+	//   LOD 7+  → mip2 (64 px). Far ring; sub-pixel detail is pointless.
+	if (lod >= 7) return 2;
+	return 0;
+}
+
+// In-memory texture size to apply for a given tile LOD. Equals the on-disk
+// pixel count for mip0/mip2, but for the LOD 5–6 mid range we deliberately
+// downsample the mip0 source to keep GPU/RAM usage manageable.
+static int ortho_texture_pixels_for_lod(int lod)
+{
+	if (lod >= 7) return 64;   // mip2 — used as-is
+	if (lod >= 5) return 256;  // mip0 downsampled to 4 m/px
+	return 1024;               // mip0 — full 1 m/px
+}
+
 std::string S3DTileManager::ortho_path_for_tile(int ei, int ni, int lod) const
 {
 	if (orthophoto_path.is_empty()) return "";
@@ -24,11 +46,9 @@ std::string S3DTileManager::ortho_path_for_tile(int ei, int ni, int lod) const
 	int lv95_n = ni * tile_size;
 	std::string fname = "/ortho_" + std::to_string(lv95_e) + "_" + std::to_string(lv95_n) + ".jpg";
 
-	// LOD 3 = full resolution (mip0), LOD 4+ = mip2 (64px)
-	if (lod >= 4) {
-		return base + "/mip2" + fname;
-	}
-	return base + fname;
+	int mip = ortho_mip_for_lod(lod);
+	if (mip == 0) return base + fname;
+	return base + "/mip" + std::to_string(mip) + fname;
 }
 
 // --- Constructor / Destructor ---
@@ -430,6 +450,8 @@ void S3DTileManager::worker_func()
 						jpf.read(reinterpret_cast<char *>(result.jpeg_bytes.data()), fsize);
 						if ((size_t)jpf.gcount() != fsize) {
 							result.jpeg_bytes.clear();
+						} else {
+							result.ortho_pixels = req.ortho_pixels;
 						}
 					}
 				}
@@ -447,6 +469,8 @@ void S3DTileManager::worker_func()
 
 void S3DTileManager::process_load_results(int &verts_generated)
 {
+	int chunks_done = 0;
+	int ortho_decodes = 0;
 	while (true) {
 		LoadResult result;
 		{
@@ -457,6 +481,12 @@ void S3DTileManager::process_load_results(int &verts_generated)
 		}
 
 		if (result.is_chunk) {
+			// Throttle chunk processing — JPEG composite is expensive.
+			if (chunks_done >= CHUNKS_PER_FRAME) {
+				std::lock_guard<std::mutex> lock(results_mutex);
+				results_queue.push_front(std::move(result));
+				break;
+			}
 			// --- Process chunk result ---
 			auto it = chunks.find(result.key);
 			if (it == chunks.end()) continue;
@@ -575,6 +605,7 @@ void S3DTileManager::process_load_results(int &verts_generated)
 			state.current_lod = 0;
 			state.node->set_heightmap(Ref<Image>()); // Free memory.
 			verts_generated += chunk_verts;
+			chunks_done++;
 			continue;
 		}
 
@@ -585,6 +616,19 @@ void S3DTileManager::process_load_results(int &verts_generated)
 		}
 
 		TileState &state = it->second;
+
+		// If this result carries an ortho JPEG that needs decoding +
+		// texture upload on the main thread, throttle it. Without this,
+		// crossing into a new chunk floods the frame with dozens of
+		// 1024² JPEG decodes and the simulation visibly stalls.
+		if (!result.jpeg_bytes.empty() && ortho_decodes >= ORTHO_DECODES_PER_FRAME) {
+			std::lock_guard<std::mutex> lock(results_mutex);
+			results_queue.push_back(std::move(result));
+			// Stop the loop entirely — the next frame will pick up where
+			// we left off. (push_back so non-ortho tiles still drain.)
+			break;
+		}
+
 		state.loading = false;
 
 		if (!result.success) {
@@ -621,29 +665,7 @@ void S3DTileManager::process_load_results(int &verts_generated)
 			tile->set_tile_x(result.ei);
 			tile->set_tile_z(result.ni);
 			tile->set_tile_size(result.tile_size);
-
-			// Per-tile material: use orthophoto texture if available.
-			if (!result.jpeg_bytes.empty()) {
-				PackedByteArray jpeg_arr;
-				jpeg_arr.resize(result.jpeg_bytes.size());
-				memcpy(jpeg_arr.ptrw(), result.jpeg_bytes.data(), result.jpeg_bytes.size());
-				result.jpeg_bytes.clear();
-
-				Ref<Image> ortho_img = Image::create_empty(1, 1, false, Image::FORMAT_RGB8);
-				Error err = ortho_img->load_jpg_from_buffer(jpeg_arr);
-				if (err == OK && ortho_img->get_width() > 1) {
-					Ref<ImageTexture> tex = ImageTexture::create_from_image(ortho_img);
-					Ref<StandardMaterial3D> mat;
-					mat.instantiate();
-					mat->set_texture(StandardMaterial3D::TEXTURE_ALBEDO, tex);
-					mat->set_cull_mode(StandardMaterial3D::CULL_DISABLED);
-					tile->set_material(mat);
-				} else {
-					tile->set_material(shared_material);
-				}
-			} else {
-				tile->set_material(shared_material);
-			}
+			tile->set_material(shared_material);
 
 			double world_x = origin_east - (double)(result.ei + 1) * tile_size;
 			double world_z = (double)result.ni * tile_size - origin_north;
@@ -651,6 +673,45 @@ void S3DTileManager::process_load_results(int &verts_generated)
 
 			add_child(tile);
 			state.node = tile;
+		}
+
+		// (Re)build the ortho material every time we get fresh JPEG bytes.
+		// LOD upgrades (far → close) deliver a higher-resolution mip than what
+		// the tile was originally created with, so the material must be
+		// refreshed — otherwise tiles loaded at mip2/mip3 stay blurry even
+		// after the camera moves into their mip0 range.
+		if (!result.jpeg_bytes.empty()) {
+			PackedByteArray jpeg_arr;
+			jpeg_arr.resize(result.jpeg_bytes.size());
+			memcpy(jpeg_arr.ptrw(), result.jpeg_bytes.data(), result.jpeg_bytes.size());
+			result.jpeg_bytes.clear();
+
+			Ref<Image> ortho_img = Image::create_empty(1, 1, false, Image::FORMAT_RGB8);
+			Error err = ortho_img->load_jpg_from_buffer(jpeg_arr);
+			if (err == OK && ortho_img->get_width() > 1) {
+				// Downsample mid-distance tiles in memory so a single mip0
+				// source can serve every LOD that needs better than mip2
+				// without blowing GPU RAM. Close range keeps full 1024 px.
+				int target_px = result.ortho_pixels;
+				if (target_px > 0 && ortho_img->get_width() > target_px) {
+					ortho_img->resize(target_px, target_px, Image::INTERPOLATE_BILINEAR);
+				}
+				// Generate mipmaps so oblique / distant viewing angles don't
+				// shimmer and so anisotropic filtering has mips to sample from.
+				ortho_img->generate_mipmaps();
+				Ref<ImageTexture> tex = ImageTexture::create_from_image(ortho_img);
+				Ref<StandardMaterial3D> mat;
+				mat.instantiate();
+				mat->set_texture(StandardMaterial3D::TEXTURE_ALBEDO, tex);
+				mat->set_cull_mode(StandardMaterial3D::CULL_DISABLED);
+				// Anisotropic filtering + clamp-to-edge: reduces texture
+				// blurriness at grazing angles (common in flight views) and
+				// prevents edge-pixel bleed from showing up as tile seams.
+				mat->set_texture_filter(BaseMaterial3D::TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC);
+				state.node->set_material(mat);
+				state.current_ortho_pixels = result.ortho_pixels;
+				ortho_decodes++;
+			}
 		}
 
 		state.node->set_heightmap(heightmap);
@@ -789,6 +850,7 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 				req.desired_lod = desired_lod;
 				req.distance = dist;
 				req.ortho_path = ortho_path_for_tile(ei, ni, desired_lod);
+				req.ortho_pixels = req.ortho_path.empty() ? -1 : ortho_texture_pixels_for_lod(desired_lod);
 				new_requests.push_back(std::move(req));
 			} else {
 				// Existing tile — update desired LOD.
@@ -850,8 +912,17 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 			state.desired_lod != state.current_lod &&
 			state.desired_lod >= 0) {
 
-			// Check if tile has cached heightmap for immediate re-mesh.
-			if (state.node->get_heightmap().is_valid()) {
+			// Decide whether the LOD change crosses a texture-resolution
+			// boundary. If it does we can't just re-mesh in place — we need
+			// to fetch a fresh ortho so the tile doesn't stay stuck at the
+			// (often coarser) resolution it was first loaded with.
+			int desired_pixels = -1;
+			if (!orthophoto_path.is_empty()) {
+				desired_pixels = ortho_texture_pixels_for_lod(state.desired_lod);
+			}
+			bool mip_change = (desired_pixels != -1 && desired_pixels != state.current_ortho_pixels);
+
+			if (state.node->get_heightmap().is_valid() && !mip_change) {
 				int stride = 1 << state.desired_lod;
 				int verts_per_axis = (tile_size - 1) / stride + 1;
 				int tile_verts = verts_per_axis * verts_per_axis;
@@ -883,7 +954,8 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 					state.node->set_heightmap(Ref<Image>());
 				}
 			} else {
-				// No cached heightmap — need file re-read for LOD change.
+				// Either no cached heightmap, or the ortho mip level needs
+				// to change — re-read from disk in both cases.
 				if (!state.loading) {
 					state.loading = true;
 					int ei = state.node->get_tile_x();
@@ -903,6 +975,7 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 					req.desired_lod = state.desired_lod;
 					req.distance = 0; // High priority for LOD upgrades.
 					req.ortho_path = ortho_path_for_tile(ei, ni, state.desired_lod);
+					req.ortho_pixels = req.ortho_path.empty() ? -1 : ortho_texture_pixels_for_lod(state.desired_lod);
 					new_requests.push_back(std::move(req));
 				}
 			}
@@ -997,11 +1070,11 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 	}
 
 	// Unload out-of-range chunks (with hysteresis margin).
-	// A chunk is removed as soon as its footprint is fully inside the
-	// individual-tile ring — the chunk Y-bias keeps any transient gap
-	// invisible (individual tiles always depth-win where loaded, and the
-	// sky underneath is masked by the chunk mesh that's still rendering
-	// below while tiles stream in).
+	// A chunk may be dropped only once every individual tile within its
+	// footprint that the camera can currently see (i.e. inside max_radius)
+	// has finished loading — otherwise we'd punch a hole in the world
+	// while the streamer catches up. The Y-bias hides Z-fighting where
+	// chunks and tiles overlap, but it can't fill a gap that has neither.
 	int chunk_unload_far = far_radius + unload_margin;
 	std::vector<uint64_t> chunks_to_remove;
 	for (auto &[key, state] : chunks) {
@@ -1017,11 +1090,32 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 		int max_dist_in_chunk = std::max(max_dei, max_dni);
 		if (min_dist > chunk_unload_far) {
 			chunks_to_remove.push_back(key);
-		} else if (max_dist_in_chunk <= max_radius) {
-			// Chunk fully inside individual tile zone — drop it; the
-			// closest-first tile queue will have those tiles loading
-			// already, and the chunk Y-bias hides any momentary gap.
-			chunks_to_remove.push_back(key);
+			continue;
+		}
+		if (max_dist_in_chunk <= max_radius) {
+			// Footprint is fully inside the individual-tile ring. Only
+			// drop the chunk if every covered tile is actually present
+			// (loaded node, or marked no_data). If any are still in
+			// flight, keep the chunk so the area stays filled.
+			bool all_ready = true;
+			for (int ldy = 0; ldy < chunk_size && all_ready; ldy++) {
+				for (int ldx = 0; ldx < chunk_size && all_ready; ldx++) {
+					int tei = base_ei + ldx;
+					int tni = base_ni + ldy;
+					int td = std::max(std::abs(tei - cam_ei), std::abs(tni - cam_ni));
+					if (td > max_radius) continue; // tile outside ring; ignore
+					auto tit = tiles.find(tile_key(tei, tni));
+					if (tit == tiles.end()) { all_ready = false; break; }
+					const TileState &ts = tit->second;
+					if (ts.no_data) continue;
+					if (!ts.node || ts.loading || ts.current_lod < 0) {
+						all_ready = false;
+					}
+				}
+			}
+			if (all_ready) {
+				chunks_to_remove.push_back(key);
+			}
 		}
 	}
 	for (uint64_t key : chunks_to_remove) {

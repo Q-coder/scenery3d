@@ -50,8 +50,10 @@ and treats the tile's zero pixels as nodata, gap-filling them first — so a
 chunk is classified as empty only when literally every underlying pixel is zero.
 
 Chunk lifecycle:
-- A chunk is removed as soon as its footprint is fully inside the individual-tile
-  ring; the closest-first tile load queue guarantees near tiles stream in fast.
+- A chunk is dropped only once every individual tile in its footprint that is
+  inside `load_radius` has finished loading (or is marked `no_data`). This
+  prevents a hole in the world while the streamer is still catching up after
+  the camera moves into a new chunk's area.
 - An individual tile beyond `load_radius` is only removed when its covering chunk
   is loaded.
 - Chunk meshes are rendered at a constant Y offset (`CHUNK_Y_BIAS = -30 m`) so
@@ -60,6 +62,18 @@ Chunk lifecycle:
   above the 1 m tile mesh.
 - Hysteresis margin (`unload_margin`, default 2 tiles) prevents thrashing at the
   far-range boundary.
+
+### Main-Thread Budgets
+
+Crossing into a new chunk can demand 64 fresh tiles at once, each requiring a
+JPEG decode and texture upload on the main thread. Three caps spread that work
+across many frames so the simulation never stalls:
+
+- `VERTEX_BUDGET_PER_FRAME = 200000` — mesh build cost.
+- `ORTHO_DECODES_PER_FRAME = 3` — tile results that include a JPEG ortho are
+  deferred once the per-frame quota is hit.
+- `CHUNKS_PER_FRAME = 1` — each chunk decodes up to `chunk_size²` mip3 JPEGs
+  and builds a composite texture, so one per frame is plenty.
 
 ### Coordinate Convention
 
