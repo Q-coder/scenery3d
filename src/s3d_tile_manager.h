@@ -43,6 +43,11 @@ namespace godot
 			S3DTile *node = nullptr;
 			int current_lod = -1;
 			int desired_lod = -1;
+			// Applied ortho texture size in pixels (1024 / 256 / 64), or -1
+			// if no ortho texture is on the tile yet. Used to decide when an
+			// LOD change requires re-fetching the orthophoto from disk so
+			// the resolution actually matches the new viewing distance.
+			int current_ortho_pixels = -1;
 			bool loading = false;
 			bool no_data = false; // File doesn't exist for this tile position.
 		};
@@ -59,6 +64,8 @@ namespace godot
 
 			// Orthophoto JPEG path (empty = no ortho for this tile).
 			std::string ortho_path;
+			// Target in-memory ortho texture size in pixels (-1 if no ortho).
+			int ortho_pixels = -1;
 
 			// Chunk fields (is_chunk == true).
 			bool is_chunk = false;
@@ -84,6 +91,8 @@ namespace godot
 			int composite_res = 0;
 			// Orthophoto JPEG bytes (empty = no ortho).
 			std::vector<uint8_t> jpeg_bytes;
+			// Target in-memory ortho texture size in pixels (-1 if none).
+			int ortho_pixels = -1;
 			// Per-tile ortho JPEGs for chunk compositing.
 			// Key: (local_x * chunk_count + local_y), value: JPEG bytes.
 			std::unordered_map<int, std::vector<uint8_t>> chunk_ortho_jpegs;
@@ -138,6 +147,17 @@ namespace godot
 		// Max vertices to generate per frame (limits mesh build cost).
 		static constexpr int VERTEX_BUDGET_PER_FRAME = 200000;
 
+		// Max number of tile results that include a JPEG ortho (decode +
+		// texture upload on the main thread) processed per frame. Without
+		// this, crossing a chunk boundary lets dozens of decodes pile into
+		// one frame and visibly stalls the simulation.
+		static constexpr int ORTHO_DECODES_PER_FRAME = 3;
+
+		// Max number of chunk results processed per frame. Each chunk
+		// decodes up to chunk_size² mip3 JPEGs and builds a composite
+		// texture, so even one is moderately expensive.
+		static constexpr int CHUNKS_PER_FRAME = 1;
+
 		// Resolution of chunk composite heightmaps.
 		static constexpr int CHUNK_COMPOSITE_RES = 33;
 
@@ -155,6 +175,8 @@ namespace godot
 
 		void rebuild_lod_rings();
 		int lod_for_distance(int dist) const;
+		// Which ortho mip level (0/2/3) should be used for a tile at this LOD.
+		static int ortho_mip_for_lod(int lod);
 
 		void start_worker();
 		void stop_worker();
