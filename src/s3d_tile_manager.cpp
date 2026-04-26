@@ -37,18 +37,24 @@ static int ortho_texture_pixels_for_lod(int lod)
 	return 1024;               // mip0 — full 1 m/px
 }
 
-std::string S3DTileManager::ortho_path_for_tile(int ei, int ni, int lod) const
+std::vector<std::string> S3DTileManager::ortho_paths_for_tile(int ei, int ni, int lod) const
 {
-	if (orthophoto_path.is_empty()) return "";
+	std::vector<std::string> out;
+	if (orthophoto_paths.is_empty()) return out;
 
-	std::string base = std::string(orthophoto_path.utf8().get_data());
 	int lv95_e = ei * tile_size;
 	int lv95_n = ni * tile_size;
 	std::string fname = "/ortho_" + std::to_string(lv95_e) + "_" + std::to_string(lv95_n) + ".jpg";
-
 	int mip = ortho_mip_for_lod(lod);
-	if (mip == 0) return base + fname;
-	return base + "/mip" + std::to_string(mip) + fname;
+	std::string suffix = (mip == 0) ? fname : ("/mip" + std::to_string(mip) + fname);
+
+	out.reserve(orthophoto_paths.size());
+	for (int i = 0; i < orthophoto_paths.size(); i++) {
+		String p = orthophoto_paths[i];
+		if (p.is_empty()) continue;
+		out.push_back(std::string(p.utf8().get_data()) + suffix);
+	}
+	return out;
 }
 
 // --- Constructor / Destructor ---
@@ -337,7 +343,7 @@ void S3DTileManager::worker_func()
 			}
 
 			// --- Read chunk ortho JPEG tiles (mip3, 16x16 each) ---
-			if (any_data && !req.ortho_mip_dir.empty()) {
+			if (any_data && !req.ortho_mip_dirs.empty()) {
 				result.chunk_tile_count = csize;
 				for (int tdy = 0; tdy < csize; tdy++) {
 					for (int tdx = 0; tdx < csize; tdx++) {
@@ -345,18 +351,24 @@ void S3DTileManager::worker_func()
 						int tni = base_ni + tdy;
 						int lv95_e = tei * ts;
 						int lv95_n = tni * ts;
-
-						std::string opath = req.ortho_mip_dir + "/ortho_"
+						std::string fname = "/ortho_"
 							+ std::to_string(lv95_e) + "_" + std::to_string(lv95_n) + ".jpg";
 
-						std::ifstream jpf(opath, std::ios::binary | std::ios::ate);
-						if (!jpf.is_open()) continue;
-						size_t fsize = (size_t)jpf.tellg();
-						if (fsize == 0 || fsize > 256 * 1024) continue;
-						jpf.seekg(0, std::ios::beg);
-						std::vector<uint8_t> jbuf(fsize);
-						jpf.read(reinterpret_cast<char *>(jbuf.data()), fsize);
-						if ((size_t)jpf.gcount() != fsize) continue;
+						// Try each ortho root in order — first hit wins.
+						std::vector<uint8_t> jbuf;
+						for (const auto &dir : req.ortho_mip_dirs) {
+							std::string opath = dir + fname;
+							std::ifstream jpf(opath, std::ios::binary | std::ios::ate);
+							if (!jpf.is_open()) continue;
+							size_t fsize = (size_t)jpf.tellg();
+							if (fsize == 0 || fsize > 256 * 1024) continue;
+							jpf.seekg(0, std::ios::beg);
+							jbuf.resize(fsize);
+							jpf.read(reinterpret_cast<char *>(jbuf.data()), fsize);
+							if ((size_t)jpf.gcount() != fsize) { jbuf.clear(); continue; }
+							break;
+						}
+						if (jbuf.empty()) continue;
 
 						int key = tdx * csize + tdy;
 						result.chunk_ortho_jpegs[key] = std::move(jbuf);
@@ -439,21 +451,22 @@ void S3DTileManager::worker_func()
 				}
 			}
 
-			// Load orthophoto JPEG if path provided.
-			if (result.success && !req.ortho_path.empty()) {
-				std::ifstream jpf(req.ortho_path, std::ios::binary | std::ios::ate);
-				if (jpf.is_open()) {
+			// Load orthophoto JPEG: try each candidate path, first that
+			// opens and reads cleanly wins. Lets CH SWISSIMAGE and DE
+			// LGL DOP20 share the same tile grid.
+			if (result.success && !req.ortho_paths.empty()) {
+				for (const auto &cand : req.ortho_paths) {
+					std::ifstream jpf(cand, std::ios::binary | std::ios::ate);
+					if (!jpf.is_open()) continue;
 					size_t fsize = (size_t)jpf.tellg();
-					if (fsize > 0 && fsize < 16 * 1024 * 1024) { // sanity cap 16 MB
-						jpf.seekg(0, std::ios::beg);
-						result.jpeg_bytes.resize(fsize);
-						jpf.read(reinterpret_cast<char *>(result.jpeg_bytes.data()), fsize);
-						if ((size_t)jpf.gcount() != fsize) {
-							result.jpeg_bytes.clear();
-						} else {
-							result.ortho_pixels = req.ortho_pixels;
-						}
-					}
+					if (fsize == 0 || fsize >= 16 * 1024 * 1024) continue;
+					jpf.seekg(0, std::ios::beg);
+					std::vector<uint8_t> jbuf(fsize);
+					jpf.read(reinterpret_cast<char *>(jbuf.data()), fsize);
+					if ((size_t)jpf.gcount() != fsize) continue;
+					result.jpeg_bytes = std::move(jbuf);
+					result.ortho_pixels = req.ortho_pixels;
+					break;
 				}
 			}
 		}
@@ -776,6 +789,10 @@ void S3DTileManager::_bind_methods()
 	ClassDB::bind_method(D_METHOD("set_orthophoto_path", "path"), &S3DTileManager::set_orthophoto_path);
 	ClassDB::bind_method(D_METHOD("get_orthophoto_path"), &S3DTileManager::get_orthophoto_path);
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "orthophoto_path"), "set_orthophoto_path", "get_orthophoto_path");
+
+	ClassDB::bind_method(D_METHOD("set_orthophoto_paths", "paths"), &S3DTileManager::set_orthophoto_paths);
+	ClassDB::bind_method(D_METHOD("get_orthophoto_paths"), &S3DTileManager::get_orthophoto_paths);
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_STRING_ARRAY, "orthophoto_paths"), "set_orthophoto_paths", "get_orthophoto_paths");
 }
 
 // --- _process ---
@@ -849,8 +866,8 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 				req.tile_size = tile_size;
 				req.desired_lod = desired_lod;
 				req.distance = dist;
-				req.ortho_path = ortho_path_for_tile(ei, ni, desired_lod);
-				req.ortho_pixels = req.ortho_path.empty() ? -1 : ortho_texture_pixels_for_lod(desired_lod);
+				req.ortho_paths = ortho_paths_for_tile(ei, ni, desired_lod);
+				req.ortho_pixels = req.ortho_paths.empty() ? -1 : ortho_texture_pixels_for_lod(desired_lod);
 				new_requests.push_back(std::move(req));
 			} else {
 				// Existing tile — update desired LOD.
@@ -917,7 +934,7 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 			// to fetch a fresh ortho so the tile doesn't stay stuck at the
 			// (often coarser) resolution it was first loaded with.
 			int desired_pixels = -1;
-			if (!orthophoto_path.is_empty()) {
+			if (!orthophoto_paths.is_empty()) {
 				desired_pixels = ortho_texture_pixels_for_lod(state.desired_lod);
 			}
 			bool mip_change = (desired_pixels != -1 && desired_pixels != state.current_ortho_pixels);
@@ -974,8 +991,8 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 					req.tile_size = tile_size;
 					req.desired_lod = state.desired_lod;
 					req.distance = 0; // High priority for LOD upgrades.
-					req.ortho_path = ortho_path_for_tile(ei, ni, state.desired_lod);
-					req.ortho_pixels = req.ortho_path.empty() ? -1 : ortho_texture_pixels_for_lod(state.desired_lod);
+					req.ortho_paths = ortho_paths_for_tile(ei, ni, state.desired_lod);
+					req.ortho_pixels = req.ortho_paths.empty() ? -1 : ortho_texture_pixels_for_lod(state.desired_lod);
 					new_requests.push_back(std::move(req));
 				}
 			}
@@ -1061,8 +1078,10 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 				req.tile_size = tile_size;
 				req.base_paths = base_paths_str;
 				req.distance = min_dist;
-				if (!orthophoto_path.is_empty()) {
-					req.ortho_mip_dir = std::string(orthophoto_path.utf8().get_data()) + "/mip3";
+				for (int i = 0; i < orthophoto_paths.size(); i++) {
+					String p = orthophoto_paths[i];
+					if (p.is_empty()) continue;
+					req.ortho_mip_dirs.push_back(std::string(p.utf8().get_data()) + "/mip3");
 				}
 				chunk_requests.push_back(std::move(req));
 			}
@@ -1246,12 +1265,25 @@ double S3DTileManager::get_origin_north() const
 
 void S3DTileManager::set_orthophoto_path(const String &p_path)
 {
-	orthophoto_path = p_path;
+	// Compat shim: replace the path list with this single entry.
+	orthophoto_paths.clear();
+	if (!p_path.is_empty()) orthophoto_paths.push_back(p_path);
 }
 
 String S3DTileManager::get_orthophoto_path() const
 {
-	return orthophoto_path;
+	if (orthophoto_paths.is_empty()) return String();
+	return orthophoto_paths[0];
+}
+
+void S3DTileManager::set_orthophoto_paths(const PackedStringArray &p_paths)
+{
+	orthophoto_paths = p_paths;
+}
+
+PackedStringArray S3DTileManager::get_orthophoto_paths() const
+{
+	return orthophoto_paths;
 }
 
 void S3DTileManager::set_elevation_db(Ref<S3DElevationDB> p_db)

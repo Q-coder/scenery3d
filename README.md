@@ -113,6 +113,13 @@ using `blit_rect` on the main thread.
 Naming: `ortho_{lv95_east}_{lv95_north}.jpg` with mip subdirectories
 (`mip2/`, `mip3/`, `mip4/`) and a `manifest.json` index.
 
+**Multi-region support.** The `orthophoto_paths` PackedStringArray accepts
+multiple roots (e.g. one for SWISSIMAGE and one for LGL DOP20). The tile
+manager probes them in order and uses the first JPEG it finds for each LV95
+tile, so Switzerland and Baden-Württemberg can be served from independent
+directories without renaming files. The legacy singular `orthophoto_path`
+property is still honoured and is treated as a one-element array.
+
 ### Terrain Tile Format
 
 Headerless 1024×1024 float32 little-endian raw files (4 MB each).
@@ -256,6 +263,39 @@ python3 tools/download_lgl_bw.py \
   --download-dir /path/to/scenery_in \
   --output      /path/to/terrain
 ```
+
+#### Baden-Württemberg Orthophoto
+
+`tools/convert_lgl_dop.py` converts LGL Baden-Württemberg DOP20 RGB GeoTIFFs
+(20 cm resolution, EPSG:25832, delivered as 2 km × 2 km tiles) to the
+scenery3d ortho tile format on the LV95 1024 m grid. For every covered LV95
+tile it emits a 1024×1024 JPEG (mip0, 1 m/px) plus 64×64 (mip2) and 16×16
+(mip3) downsamples, matching the SWISSIMAGE pipeline. The same
+`--min-valid-fraction` filter as the DGM converter prevents streaky edge tiles.
+
+```bash
+python3 tools/convert_lgl_dop.py \
+  --input  /path/to/bw_dop20/ \
+  --output /path/to/scenery/Germany/Baden-Wuertemberg/orthophoto \
+  --src-crs EPSG:25832
+```
+
+`tools/download_lgl_dop.py` automates the full pipeline: HEAD-probe the LGL
+Open GeoData Portal for available 2 km DOP20 cells in a UTM32 bbox, download
+them in parallel, extract the GeoTIFFs and invoke the converter. Like the DGM
+downloader it is idempotent.
+
+```bash
+python3 tools/download_lgl_dop.py \
+  --download-dir /path/to/scenery_in_dop \
+  --output       /path/to/scenery/Germany/Baden-Wuertemberg/orthophoto
+```
+
+DOP20 source data is large (~80–120 MB per 2 km ZIP, full BW ~2.5 TB); plan
+storage accordingly or restrict via `--extent`.
+
+License: dl-de/by-2-0 — required attribution: *“Datenquelle: LGL,
+www.lgl-bw.de, dl-de/by-2-0”*.
 
 ## Building
 

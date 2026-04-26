@@ -70,6 +70,10 @@ void Scenery3D::_bind_methods()
 	ClassDB::bind_method(D_METHOD("get_orthophoto_path"), &Scenery3D::get_orthophoto_path);
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "orthophoto_path"), "set_orthophoto_path", "get_orthophoto_path");
 
+	ClassDB::bind_method(D_METHOD("set_orthophoto_paths", "paths"), &Scenery3D::set_orthophoto_paths);
+	ClassDB::bind_method(D_METHOD("get_orthophoto_paths"), &Scenery3D::get_orthophoto_paths);
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_STRING_ARRAY, "orthophoto_paths"), "set_orthophoto_paths", "get_orthophoto_paths");
+
 	ClassDB::bind_method(D_METHOD("hide_building", "uuid"), &Scenery3D::hide_building);
 	ClassDB::bind_method(D_METHOD("show_building", "uuid"), &Scenery3D::show_building);
 	ClassDB::bind_method(D_METHOD("is_building_hidden", "uuid"), &Scenery3D::is_building_hidden);
@@ -105,8 +109,19 @@ void Scenery3D::_ready()
 	tile_manager->set_data_paths(data_paths);
 	tile_manager->set_origin_east(origin_east);
 	tile_manager->set_origin_north(origin_north);
-	if (!orthophoto_path.is_empty()) {
-		tile_manager->set_orthophoto_path(orthophoto_path);
+	// Resolve orthophoto_paths: array wins, then single path, then project setting.
+	if (orthophoto_paths.is_empty() && !orthophoto_path.is_empty()) {
+		orthophoto_paths.push_back(orthophoto_path);
+	}
+	if (orthophoto_paths.is_empty()) {
+		ProjectSettings *ps = ProjectSettings::get_singleton();
+		if (ps && ps->has_setting("scenery3d/orthophoto_paths")) {
+			Variant ov = ps->get_setting("scenery3d/orthophoto_paths");
+			if (ov.get_type() == Variant::PACKED_STRING_ARRAY) orthophoto_paths = ov;
+		}
+	}
+	if (!orthophoto_paths.is_empty()) {
+		tile_manager->set_orthophoto_paths(orthophoto_paths);
 	}
 
 	// Create the elevation database and share it with the tile manager.
@@ -311,14 +326,31 @@ PackedStringArray Scenery3D::get_road_paths() const
 void Scenery3D::set_orthophoto_path(const String &p_path)
 {
 	orthophoto_path = p_path;
+	orthophoto_paths.clear();
+	if (!p_path.is_empty()) orthophoto_paths.push_back(p_path);
 	if (tile_manager) {
-		tile_manager->set_orthophoto_path(p_path);
+		tile_manager->set_orthophoto_paths(orthophoto_paths);
 	}
 }
 
 String Scenery3D::get_orthophoto_path() const
 {
+	if (!orthophoto_paths.is_empty()) return orthophoto_paths[0];
 	return orthophoto_path;
+}
+
+void Scenery3D::set_orthophoto_paths(const PackedStringArray &p_paths)
+{
+	orthophoto_paths = p_paths;
+	orthophoto_path = p_paths.is_empty() ? String() : p_paths[0];
+	if (tile_manager) {
+		tile_manager->set_orthophoto_paths(p_paths);
+	}
+}
+
+PackedStringArray Scenery3D::get_orthophoto_paths() const
+{
+	return orthophoto_paths;
 }
 
 void Scenery3D::hide_building(const String &uuid)
