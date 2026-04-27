@@ -88,6 +88,56 @@ UTM_TO_LV95_SAFETY_M = 200
 
 ZIP_NAME_RE = re.compile(r"dop20rgb_32_(\d+)_(\d+)_2_bw\.zip$")
 
+# LGL DOP20 is anchored on a 2 km UTM32 grid with E_km odd and N_km even.
+# Full Baden-Württemberg lives within roughly this UTM32 bbox in km.
+BW_UTM_BBOX_KM = (432, 5262, 612, 5518)
+
+
+def utm_cell_for_point(e_m: float, n_m: float) -> tuple[int, int]:
+    """Return the (E_km, N_km) of the LGL DOP20 cell containing (e_m, n_m)."""
+    e_km_floor = int(e_m // 1000)
+    n_km_floor = int(n_m // 1000)
+    # Odd-E anchor: cell start km is the largest odd k <= e_km_floor.
+    e_km = e_km_floor if (e_km_floor % 2) == 1 else e_km_floor - 1
+    # Even-N anchor: cell start km is the largest even k <= n_km_floor.
+    n_km = n_km_floor - (n_km_floor % 2)
+    return (e_km, n_km)
+
+
+def cell_in_bw(e_km: int, n_km: int) -> bool:
+    e_lo, n_lo, e_hi, n_hi = BW_UTM_BBOX_KM
+    return (e_lo <= e_km < e_hi and n_lo <= n_km < n_hi
+            and (e_km % 2) == 1 and (n_km % 2) == 0)
+
+
+def tile_lv95_to_utm_bbox(tx: int, tz: int
+                          ) -> tuple[float, float, float, float]:
+    """Reproject an LV95 1024 m tile to a UTM32 axis-aligned bbox (m)."""
+    e_min = tx * TILE_SIZE_M
+    n_min = tz * TILE_SIZE_M
+    return transform_bounds(LV95_CRS, SRC_CRS,
+                            e_min, n_min,
+                            e_min + TILE_SIZE_M, n_min + TILE_SIZE_M,
+                            densify_pts=21)
+
+
+def tile_required_utm_cells(tx: int, tz: int) -> set[tuple[int, int]]:
+    """All BW DOP20 cells whose 2 km bbox overlaps LV95 tile (tx, tz)."""
+    le, lb, re_, tb = tile_lv95_to_utm_bbox(tx, tz)
+    cells: set[tuple[int, int]] = set()
+    # Walk the 2 km grid spanning the UTM bbox.
+    e_start = utm_cell_for_point(le, lb)[0]
+    n_start = utm_cell_for_point(le, lb)[1]
+    e = e_start
+    while e * 1000.0 < re_:
+        n = n_start
+        while n * 1000.0 < tb:
+            if cell_in_bw(e, n):
+                cells.add((e, n))
+            n += 2
+        e += 2
+    return cells
+
 
 def parse_zip_name(path: Path) -> tuple[int, int] | None:
     m = ZIP_NAME_RE.match(path.name)
@@ -132,18 +182,30 @@ def lv95_bbox_to_tiles(bbox: tuple[float, float, float, float]
 
 
 def build_index(zip_dir: Path,
-                extent: tuple[float, float, float, float] | None
+                extent: tuple[float, float, float, float] | None,
+                require_complete: bool,
                 ) -> tuple[dict[tuple[int, int], list[Path]],
-                           dict[Path, list[tuple[int, int]]]]:
+                           dict[Path, list[tuple[int, int]]],
+                           int]:
     """Map each LV95 tile to the ZIPs that cover it and vice versa.
 
-    Returns (tile_to_zips, zip_to_tiles).
+    Returns (tile_to_zips, zip_to_tiles, deferred_tile_count).
+    When ``require_complete`` is set, tiles whose required UTM neighbour
+    cells (within BW) are not all present on disk are dropped and their
+    contributing ZIPs are not flagged for deletion eligibility.
     """
     zips = sorted(zip_dir.glob("dop20rgb_32_*_*_2_bw.zip"))
     print(f"  scanning {len(zips)} ZIP(s) in {zip_dir}")
 
+    present_cells: dict[tuple[int, int], Path] = {}
+    for zp in zips:
+        cell = parse_zip_name(zp)
+        if cell is not None:
+            present_cells[cell] = zp
+
     tile_to_zips: dict[tuple[int, int], list[Path]] = {}
     zip_to_tiles: dict[Path, list[tuple[int, int]]] = {}
+    deferred = 0
 
     for zp in zips:
         cell = parse_zip_name(zp)
@@ -167,11 +229,22 @@ def build_index(zip_dir: Path,
                      if tx_lo <= tx <= tx_hi and tz_lo <= tz <= tz_hi]
         if not tiles:
             continue
-        zip_to_tiles[zp] = tiles
+
+        kept: list[tuple[int, int]] = []
         for t in tiles:
+            if require_complete:
+                required = tile_required_utm_cells(*t)
+                if not required.issubset(present_cells.keys()):
+                    deferred += 1
+                    continue
+            kept.append(t)
+        if not kept:
+            continue
+        zip_to_tiles[zp] = kept
+        for t in kept:
             tile_to_zips.setdefault(t, []).append(zp)
 
-    return tile_to_zips, zip_to_tiles
+    return tile_to_zips, zip_to_tiles, deferred
 
 
 def render_tile_from_zips(tx: int, tz: int, zip_paths: list[Path],
@@ -330,7 +403,17 @@ def main() -> int:
                         help="Worker processes (default: ncpu/2).")
     parser.add_argument("--delete-zips", action="store_true",
                         help="Delete each ZIP once every LV95 tile it covers "
-                             "has been processed (write or skip-exists).")
+                             "has been processed (write or skip-exists). "
+                             "Implies --require-complete-coverage unless "
+                             "--unsafe-delete is given.")
+    parser.add_argument("--require-complete-coverage", action="store_true",
+                        help="Skip LV95 tiles whose contributing UTM cells "
+                             "are not all on disk (so re-running after more "
+                             "downloads picks them up cleanly).")
+    parser.add_argument("--unsafe-delete", action="store_true",
+                        help="Allow --delete-zips even when neighbour cells "
+                             "are missing. Boundary tiles may end up frozen "
+                             "at partial coverage. Not recommended.")
     args = parser.parse_args()
 
     zip_dir = Path(args.zip_dir).expanduser().resolve()
@@ -344,12 +427,19 @@ def main() -> int:
 
     print(f"[1/3] Indexing ZIPs")
     extent = tuple(args.extent) if args.extent else None
-    tile_to_zips, zip_to_tiles = build_index(zip_dir, extent)
+    require_complete = args.require_complete_coverage or (
+        args.delete_zips and not args.unsafe_delete)
+    tile_to_zips, zip_to_tiles, deferred = build_index(
+        zip_dir, extent, require_complete=require_complete)
     if not tile_to_zips:
         print("No tiles intersect the requested area. Nothing to do.")
+        if deferred:
+            print(f"  ({deferred} tile(s) deferred until missing UTM "
+                  f"neighbours are downloaded.)")
         return 0
     print(f"      {len(tile_to_zips)} LV95 tile(s) covered "
-          f"by {len(zip_to_tiles)} ZIP(s)")
+          f"by {len(zip_to_tiles)} ZIP(s)"
+          + (f"; {deferred} deferred" if deferred else ""))
 
     # Process in (tz, tx) order for spatial locality.
     work = sorted(((tx, tz, [str(p) for p in zips])
