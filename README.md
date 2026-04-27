@@ -291,8 +291,26 @@ python3 tools/download_lgl_dop.py \
   --output       /path/to/scenery/Germany/Baden-Wuertemberg/orthophoto
 ```
 
-DOP20 source data is large (~80–120 MB per 2 km ZIP, full BW ~2.5 TB); plan
+DOP20 source data is large (~225 MB per 2 km ZIP, full BW ~1.6 TB); plan
 storage accordingly or restrict via `--extent`.
+
+`tools/process_lgl_dop.py` is the streaming alternative to the
+extract-then-convert pipeline. It reads each TIFF straight out of the ZIP via
+GDAL's `/vsizip/` virtual filesystem, so it never extracts to disk. With
+`--delete-zips` it removes each ZIP as soon as every LV95 tile it covers has
+been written, which lets you process the full BW corpus on a disk that
+doesn't have room to hold all the source data at once.
+
+```bash
+python3 tools/process_lgl_dop.py \
+  --zip-dir /Volumes/Data1/scenery_in_dop \
+  --output  /Volumes/Data1/scenery/Germany/Baden-Wuertemberg/orthophoto \
+  --jobs 8 --delete-zips
+```
+
+The tool is resumable: re-running on a partially-deleted ZIP set just covers
+the remaining area, and existing JPEGs are skipped unless `--overwrite` is
+given. Safe to run alongside an in-progress `download_lgl_dop.py`.
 
 License: dl-de/by-2-0 — required attribution: *“Datenquelle: LGL,
 www.lgl-bw.de, dl-de/by-2-0”*.
