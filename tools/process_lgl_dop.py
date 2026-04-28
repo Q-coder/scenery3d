@@ -264,7 +264,15 @@ def render_tile_from_zips(tx: int, tz: int, zip_paths: list[Path],
     dst_transform = Affine(pixel, 0.0, e_min, 0.0, -pixel, n_max)
 
     dst = np.zeros((3, MIP0_PX, MIP0_PX), dtype=np.uint8)
-    cover = np.zeros((MIP0_PX, MIP0_PX), dtype=bool)
+    # Per-pixel coverage quality, 0..255. We reproject a unit-mask
+    # alongside the data with bilinear resampling: pixels whose mask
+    # comes back at 255 had all bilinear neighbours fully inside the
+    # source TIFF (clean colour), pixels at 1..254 are on the source's
+    # bilinear edge (partially-darkened colour). A later source whose
+    # mask is strictly higher at the same pixel overwrites the earlier
+    # source's value. This eliminates the diagonal black seams that
+    # previously appeared along UTM cell / inner-TIFF boundaries.
+    best_q = np.zeros((MIP0_PX, MIP0_PX), dtype=np.uint8)
 
     for zp in zip_paths:
         try:
@@ -301,15 +309,59 @@ def render_tile_from_zips(tx: int, tz: int, zip_paths: list[Path],
                             dst_crs=LV95_CRS,
                             resampling=Resampling.bilinear,
                         )
-                    tmp_cover = (tmp[0] | tmp[1] | tmp[2]).astype(bool)
-                    need = ~cover & tmp_cover
-                    if need.any():
+
+                    # Reproject a unit mask covering the full source
+                    # extent. Bilinear resampling of a 0/255 mask gives
+                    # 255 in fully-covered interior, 1..254 along the
+                    # bilinear edge, and 0 outside.
+                    src_mask = np.full(
+                        (vrt.height, vrt.width), 255, dtype=np.uint8)
+                    tmp_q = np.zeros((MIP0_PX, MIP0_PX), dtype=np.uint8)
+                    reproject(
+                        source=src_mask,
+                        destination=tmp_q,
+                        src_transform=vrt.transform,
+                        src_crs=LV95_CRS,
+                        dst_transform=dst_transform,
+                        dst_crs=LV95_CRS,
+                        resampling=Resampling.bilinear,
+                    )
+
+                    upgrade = tmp_q > best_q
+                    if upgrade.any():
                         for c in range(3):
-                            dst[c][need] = tmp[c][need]
-                        cover |= need
+                            dst[c][upgrade] = tmp[c][upgrade]
+                        best_q[upgrade] = tmp_q[upgrade]
             finally:
                 src.close()
 
+    cover = best_q > 0
+                    # Reproject a unit mask covering the full source
+                    # extent. Bilinear resampling of a 0/255 mask gives
+                    # 255 in fully-covered interior, 1..254 along the
+                    # bilinear edge, and 0 outside.
+                    src_mask = np.full(
+                        (vrt.height, vrt.width), 255, dtype=np.uint8)
+                    tmp_q = np.zeros((MIP0_PX, MIP0_PX), dtype=np.uint8)
+                    reproject(
+                        source=src_mask,
+                        destination=tmp_q,
+                        src_transform=vrt.transform,
+                        src_crs=LV95_CRS,
+                        dst_transform=dst_transform,
+                        dst_crs=LV95_CRS,
+                        resampling=Resampling.bilinear,
+                    )
+
+                    upgrade = tmp_q > best_q
+                    if upgrade.any():
+                        for c in range(3):
+                            dst[c][upgrade] = tmp[c][upgrade]
+                        best_q[upgrade] = tmp_q[upgrade]
+            finally:
+                src.close()
+
+    cover = best_q > 0
     if not cover.any():
         return None
     if cover.sum() / cover.size < min_valid_fraction:

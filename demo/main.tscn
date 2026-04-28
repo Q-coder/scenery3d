@@ -9,12 +9,14 @@ ambient_light_source = 1
 ambient_light_color = Color(0.55, 0.6, 0.7, 1)
 ambient_light_energy = 0.6
 
+[sub_resource type="LabelSettings" id="LabelSettings_ig7tw"]
+
 [node name="Main" type="Node3D" unique_id=1473369653]
 
 [node name="Scenery3D" type="Scenery3D" parent="." unique_id=806723349]
 load_radius = 50
 data_path = "/Users/gery/provpilot/scenery/Switzerland/terrain"
-data_paths = PackedStringArray("/Users/gery/provpilot/scenery/Switzerland/terrain", "/Volumes/Data1/scenery/Germany/Baden-Wuertemberg/terrain")
+data_paths = PackedStringArray("/Users/gery/provpilot/scenery/Switzerland/terrain", "/Users/gery/provpilot/scenery/Germany/Baden-Wuertemberg/terrain")
 buildings_path = "/Users/gery/provpilot/scenery/Switzerland/buildings"
 water_paths = PackedStringArray("/Users/gery/code/provpilot/scenery/water")
 road_paths = PackedStringArray("/Users/gery/provpilot/scenery/Switzerland/roads")
@@ -34,3 +36,18 @@ directional_shadow_max_distance = 10000.0
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=145196333]
 environment = SubResource("env_1")
+
+[node name="HUD" type="CanvasLayer" parent="." unique_id=2074410001]
+
+[node name="Label" type="Label" parent="HUD" unique_id=2074410002]
+offset_left = 8.0
+offset_top = 6.0
+offset_right = 600.0
+offset_bottom = 110.0
+scale = Vector2(3, 3)
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 4
+theme_override_font_sizes/font_size = 34
+text = "HUD"
+label_settings = SubResource("LabelSettings_ig7tw")
