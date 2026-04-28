@@ -336,32 +336,6 @@ def render_tile_from_zips(tx: int, tz: int, zip_paths: list[Path],
                 src.close()
 
     cover = best_q > 0
-                    # Reproject a unit mask covering the full source
-                    # extent. Bilinear resampling of a 0/255 mask gives
-                    # 255 in fully-covered interior, 1..254 along the
-                    # bilinear edge, and 0 outside.
-                    src_mask = np.full(
-                        (vrt.height, vrt.width), 255, dtype=np.uint8)
-                    tmp_q = np.zeros((MIP0_PX, MIP0_PX), dtype=np.uint8)
-                    reproject(
-                        source=src_mask,
-                        destination=tmp_q,
-                        src_transform=vrt.transform,
-                        src_crs=LV95_CRS,
-                        dst_transform=dst_transform,
-                        dst_crs=LV95_CRS,
-                        resampling=Resampling.bilinear,
-                    )
-
-                    upgrade = tmp_q > best_q
-                    if upgrade.any():
-                        for c in range(3):
-                            dst[c][upgrade] = tmp[c][upgrade]
-                        best_q[upgrade] = tmp_q[upgrade]
-            finally:
-                src.close()
-
-    cover = best_q > 0
     if not cover.any():
         return None
     if cover.sum() / cover.size < min_valid_fraction:
