@@ -382,6 +382,16 @@ void S3DTileManager::worker_func()
 
 			size_t expected_size = (size_t)req.tile_size * req.tile_size * 4;
 			size_t sample_count = (size_t)req.tile_size * req.tile_size;
+			// Read all sources and merge per-pixel, with LATER sources
+			// overriding earlier ones at any pixel where the later source
+			// is non-zero. This lets the user encode authoritative priority
+			// via `data_paths` order: e.g. ["Switzerland", "BW"] means BW
+			// wins for German pixels where it has data, falling back to CH
+			// elsewhere — important because CH ALTI3D extends beyond the
+			// border with extrapolated values that disagree with BW DGM by
+			// up to 40 m. A simple "first source wholesale" or "biggest
+			// coverage wins" rule fails on tiles where CH has 100 %
+			// coverage but only the DE corner is real ground truth.
 			std::vector<uint8_t> scratch;
 			for (const auto &candidate : req.paths) {
 				std::ifstream file(candidate, std::ios::binary);
@@ -391,18 +401,14 @@ void S3DTileManager::worker_func()
 				if ((size_t)file.gcount() != expected_size) continue;
 
 				if (!result.success) {
-					// First source: adopt it wholesale.
 					result.raw_bytes = std::move(scratch);
 					scratch.clear();
 					result.success = true;
 				} else {
-					// Subsequent sources: fill cells still at 0 from this one.
-					// Lets border tiles from adjacent datasets (e.g. CH + BW)
-					// merge seamlessly when both exist at the same LV95 index.
 					float *dst = reinterpret_cast<float *>(result.raw_bytes.data());
 					const float *src = reinterpret_cast<const float *>(scratch.data());
 					for (size_t i = 0; i < sample_count; ++i) {
-						if (dst[i] == 0.0f && src[i] != 0.0f) {
+						if (src[i] != 0.0f) {
 							dst[i] = src[i];
 						}
 					}
