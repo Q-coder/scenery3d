@@ -190,26 +190,25 @@ def extract_all(zips: list[Path], input_dir: Path):
     print(f"  extracted {extracted}, already-present {skipped}, failed {failed}")
 
 
-def run_converter(input_dir: Path, output_dir: Path, src_crs: str,
-                  extra_args: list[str]):
-    script = Path(__file__).resolve().parent / "convert_lgl_dop.py"
+def run_streaming_processor(zip_dir: Path, output_dir: Path,
+                            extra_args: list[str]):
+    script = Path(__file__).resolve().parent / "process_lgl_dop.py"
     cmd = [sys.executable, str(script),
-           "--input", str(input_dir),
-           "--output", str(output_dir),
-           "--src-crs", src_crs] + extra_args
+           "--zip-dir", str(zip_dir),
+           "--output", str(output_dir)] + extra_args
     print("  $", " ".join(cmd))
     subprocess.run(cmd, check=True)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Download, extract and convert LGL BW DOP20 RGB tiles.",
+        description="Download LGL BW DOP20 RGB tiles (and optionally process them).",
     )
     parser.add_argument("--download-dir", required=True,
-                        help="Where ZIPs are stored and extracted.")
+                        help="Where ZIPs are stored.")
     parser.add_argument("--output",
-                        help="Output directory for ortho JPEGs (required "
-                             "unless --no-convert).")
+                        help="Output directory for ortho JPEGs. Required "
+                             "only if --process is given.")
     parser.add_argument("--extent", type=int, nargs=4,
                         metavar=("E_MIN", "N_MIN", "E_MAX", "N_MAX"),
                         default=DEFAULT_EXTENT,
@@ -223,17 +222,17 @@ def main() -> int:
     parser.add_argument("--download-workers", type=int, default=4,
                         help="Download parallelism (default: 4). DOPs are "
                              "much larger than DGMs so 4 is a good balance.")
-    parser.add_argument("--no-convert", action="store_true",
-                        help="Download + extract only, skip the conversion step.")
-    parser.add_argument("--src-crs", default="EPSG:25832",
-                        help="Source CRS override passed to the converter.")
-    parser.add_argument("--convert-arg", action="append", default=[],
-                        help="Extra arg forwarded to convert_lgl_dop.py "
-                             "(repeatable).")
+    parser.add_argument("--process", action="store_true",
+                        help="After downloading, invoke process_lgl_dop.py to "
+                             "stream-convert ZIPs into ortho JPEGs.")
+    parser.add_argument("--process-arg", action="append", default=[],
+                        help="Extra arg forwarded to process_lgl_dop.py "
+                             "(e.g. --process-arg=--jobs=8 "
+                             "--process-arg=--delete-zips). Repeatable.")
     args = parser.parse_args()
 
-    if not args.no_convert and not args.output:
-        parser.error("--output is required unless --no-convert is given")
+    if args.process and not args.output:
+        parser.error("--output is required when --process is given")
 
     download_dir = Path(args.download_dir).expanduser().resolve()
 
@@ -253,15 +252,15 @@ def main() -> int:
                 except ValueError:
                     continue
         cells = sorted(set(cells))
-        print(f"[1/4] Loaded {len(cells)} cells from {cells_path}")
+        print(f"[1/3] Loaded {len(cells)} cells from {cells_path}")
     else:
-        print(f"[1/4] Enumerating 2 km cells in UTM32 extent "
+        print(f"[1/3] Enumerating 2 km cells in UTM32 extent "
               f"E [{args.extent[0]}, {args.extent[2]}] × "
               f"N [{args.extent[1]}, {args.extent[3]}]")
         cells = enumerate_candidates(tuple(args.extent))
         print(f"      {len(cells)} candidate cells")
 
-    print(f"[2/4] Probing availability with {args.probe_workers} workers")
+    print(f"[2/3] Probing availability with {args.probe_workers} workers")
     hits = probe_and_index(cells, workers=args.probe_workers)
     if not hits:
         print("No available tiles found for this extent. Exiting.",
@@ -270,19 +269,22 @@ def main() -> int:
     total_gb = sum(s for _, _, s in hits) / 1e9
     print(f"      {len(hits)} tiles available (~{total_gb:.1f} GB total)")
 
-    print(f"[3/4] Downloading missing ZIPs into {download_dir}")
-    zips = download_all(hits, download_dir, workers=args.download_workers)
+    print(f"[3/3] Downloading missing ZIPs into {download_dir}")
+    download_all(hits, download_dir, workers=args.download_workers)
 
-    print(f"[4/4] Extracting ZIPs into per-tile subdirectories")
-    extract_all(zips, download_dir)
-
-    if args.no_convert:
-        print("Done (skipping conversion).")
+    if not args.process:
+        print("\nDownload complete. Next step: stream-convert with\n"
+              "  python tools/process_lgl_dop.py \\\n"
+              f"      --zip-dir {download_dir} \\\n"
+              "      --output  /path/to/orthophoto \\\n"
+              "      --jobs 8 --delete-zips\n"
+              "(--delete-zips removes each ZIP once every LV95 tile it "
+              "contributes to has been written; safe at boundaries.)")
         return 0
 
     output_dir = Path(args.output).expanduser().resolve()
-    print(f"Running convert_lgl_dop.py → {output_dir}")
-    run_converter(download_dir, output_dir, args.src_crs, args.convert_arg)
+    print(f"Running process_lgl_dop.py → {output_dir}")
+    run_streaming_processor(download_dir, output_dir, args.process_arg)
 
     print("All done.")
     return 0
