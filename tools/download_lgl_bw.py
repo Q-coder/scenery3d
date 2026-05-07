@@ -160,7 +160,10 @@ def download_all(hits, download_dir: Path, workers: int) -> list[Path]:
         for idx, (dest, ok) in enumerate(ex.map(worker, jobs), start=1):
             if ok:
                 ok_count += 1
-                total_bytes += dest.stat().st_size
+                try:
+                    total_bytes += dest.stat().st_size
+                except FileNotFoundError:
+                    pass
             else:
                 fail_count += 1
             if idx % 20 == 0 or idx == len(jobs):
@@ -199,12 +202,26 @@ def extract_all(zips: list[Path], input_dir: Path):
     print(f"  extracted {extracted}, already-present {skipped}, failed {failed}")
 
 
+def run_xyz_to_tif(input_dir: Path, src_crs: str, workers: int):
+    script = Path(__file__).resolve().parent / "xyz_to_tif.py"
+    cmd = [sys.executable, "-u", str(script),
+           "--input", str(input_dir),
+           "--src-crs", src_crs,
+           "--workers", str(workers)]
+    print("  $", " ".join(cmd))
+    subprocess.run(cmd, check=True)
+
+
 def run_converter(input_dir: Path, output_dir: Path, src_crs: str, extra_args: list[str]):
     script = Path(__file__).resolve().parent / "convert_lgl_bw.py"
+    # XYZ files have been pre-converted to GeoTIFF in step [5/6]; restrict
+    # the converter pattern so it doesn't open the (huge, slow) ASCII
+    # files alongside their TIFF siblings.
     cmd = [sys.executable, str(script),
            "--input", str(input_dir),
            "--output", str(output_dir),
-           "--src-crs", src_crs] + extra_args
+           "--src-crs", src_crs,
+           "--pattern", "*.tif,*.tiff"] + extra_args
     print("  $", " ".join(cmd))
     subprocess.run(cmd, check=True)
 
@@ -232,6 +249,8 @@ def main() -> int:
                         help="HEAD-probe parallelism (default: 32).")
     parser.add_argument("--download-workers", type=int, default=8,
                         help="Download parallelism (default: 8).")
+    parser.add_argument("--xyz-workers", type=int, default=8,
+                        help="XYZ→GeoTIFF parallelism (default: 8).")
     parser.add_argument("--no-convert", action="store_true",
                         help="Download + extract only, skip the conversion step.")
     parser.add_argument("--src-crs", default="EPSG:25832",
@@ -262,15 +281,15 @@ def main() -> int:
                 except ValueError:
                     continue
         cells = sorted(set(cells))
-        print(f"[1/4] Loaded {len(cells)} cells from {cells_path}")
+        print(f"[1/6] Loaded {len(cells)} cells from {cells_path}")
     else:
-        print(f"[1/4] Enumerating 2 km cells in UTM32 extent "
+        print(f"[1/6] Enumerating 2 km cells in UTM32 extent "
               f"E [{args.extent[0]}, {args.extent[2]}] × N [{args.extent[1]}, {args.extent[3]}]")
         cells = enumerate_candidates(tuple(args.extent))
         print(f"      {len(cells)} candidate cells")
 
     # 2) HEAD-probe the portal to find the ones that actually exist.
-    print(f"[2/4] Probing availability with {args.probe_workers} workers")
+    print(f"[2/6] Probing availability with {args.probe_workers} workers")
     hits = probe_and_index(cells, workers=args.probe_workers)
     if not hits:
         print("No available tiles found for this extent. Exiting.", file=sys.stderr)
@@ -279,20 +298,26 @@ def main() -> int:
     print(f"      {len(hits)} tiles available (~{total_mb:.0f} MB total)")
 
     # 3) Download missing ZIPs.
-    print(f"[3/4] Downloading missing ZIPs into {download_dir}")
+    print(f"[3/6] Downloading missing ZIPs into {download_dir}")
     zips = download_all(hits, download_dir, workers=args.download_workers)
 
     # 4) Extract XYZ files.
-    print(f"[4/4] Extracting ZIPs into per-tile subdirectories")
+    print(f"[4/6] Extracting ZIPs into per-tile subdirectories")
     extract_all(zips, download_dir)
 
-    # 5) Optional: run the converter.
+    # 5) Convert XYZ → GeoTIFF in place. GDAL's XYZ driver scans the
+    #    entire ASCII file on open(), so opening tens of thousands of
+    #    XYZ files at once in convert_lgl_bw.py is infeasible. GeoTIFFs
+    #    only read the header on open(), making the merge step cheap.
     if args.no_convert:
         print("Done (skipping conversion).")
         return 0
 
+    print(f"[5/6] Converting XYZ tiles to GeoTIFF in {download_dir}")
+    run_xyz_to_tif(download_dir, args.src_crs, args.xyz_workers)
+
     output_dir = Path(args.output).expanduser().resolve()
-    print(f"Running convert_lgl_bw.py → {output_dir}")
+    print(f"[6/6] Running convert_lgl_bw.py → {output_dir}")
     run_converter(download_dir, output_dir, args.src_crs, args.convert_arg)
 
     print("All done.")

@@ -43,10 +43,26 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import resource
 import sys
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
+
+
+def _raise_fd_limit():
+    """Try to raise RLIMIT_NOFILE to the hard cap. macOS default soft is 256."""
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = hard if hard != resource.RLIM_INFINITY else 65536
+        if soft < target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except (ValueError, OSError):
+        pass
+
+
+_raise_fd_limit()
 
 try:
     import rasterio
@@ -64,35 +80,95 @@ LV95_CRS = "EPSG:2056"
 DEFAULT_SRC_CRS = "EPSG:25832"  # UTM32N, used by LGL BW
 
 
-def open_sources(tif_paths: list[Path], src_crs_override: str | None):
-    """Open rasters and return list of (WarpedVRT in LV95, lv95_bounds)."""
-    opened = []
-    for p in tif_paths:
-        src = rasterio.open(p)
-        src_crs = src.crs or src_crs_override
-        if src_crs is None:
-            src.close()
-            raise RuntimeError(
-                f"{p}: source CRS missing from file; pass --src-crs "
-                f"(e.g. EPSG:25832 for LGL BW UTM32N)."
-            )
-        # DGM1 XYZ files encode water (Rhine, Bodensee, …) as nodata = 0.0.
-        # Force that through the VRT so bilinear resampling doesn't blend
-        # real elevations against 0 and produce edge cliffs along rivers.
-        src_nodata = src.nodata if src.nodata is not None else 0.0
-        # Lazy-reproject the source into LV95. WarpedVRT handles the
-        # per-read bilinear resampling.
+class SourceEntry:
+    """Metadata about a source raster, with on-demand cached opener."""
+
+    __slots__ = ("path", "src_crs", "src_nodata", "bounds")
+
+    def __init__(self, path: Path, src_crs: str, src_nodata: float,
+                 bounds: tuple[float, float, float, float]):
+        self.path = path
+        self.src_crs = src_crs
+        self.src_nodata = src_nodata
+        self.bounds = bounds  # LV95 (left, bottom, right, top)
+
+
+class SourceCache:
+    """LRU cache of (rasterio.DatasetReader, WarpedVRT) handles.
+
+    Opening 35k+ files at once exhausts the OS file-descriptor limit; this
+    class keeps at most `max_open` source pairs alive and lazily reopens
+    others on demand.
+    """
+
+    def __init__(self, max_open: int = 128):
+        self.max_open = max_open
+        self._cache: "OrderedDict[Path, tuple]" = OrderedDict()
+
+    def get(self, entry: SourceEntry):
+        """Return (vrt, src) for `entry`, opening if necessary."""
+        cached = self._cache.get(entry.path)
+        if cached is not None:
+            self._cache.move_to_end(entry.path)
+            return cached
+        while len(self._cache) >= self.max_open:
+            _path, (old_vrt, old_src) = self._cache.popitem(last=False)
+            try:
+                old_vrt.close()
+            finally:
+                old_src.close()
+        src = rasterio.open(entry.path)
         vrt = WarpedVRT(
             src,
-            src_crs=src_crs,
+            src_crs=entry.src_crs,
             crs=LV95_CRS,
             resampling=Resampling.bilinear,
-            src_nodata=src_nodata,
+            src_nodata=entry.src_nodata,
             nodata=np.nan,
         )
-        b = vrt.bounds  # already in LV95
-        opened.append((vrt, src, b))
-    return opened
+        self._cache[entry.path] = (vrt, src)
+        return vrt, src
+
+    def close_all(self):
+        for _path, (vrt, src) in self._cache.items():
+            try:
+                vrt.close()
+            finally:
+                src.close()
+        self._cache.clear()
+
+
+def scan_sources(tif_paths: list[Path], src_crs_override: str | None,
+                 progress_every: int = 500) -> list[SourceEntry]:
+    """Open each raster briefly to capture its CRS, nodata and LV95 bounds.
+
+    Files are closed immediately so we never hold more than one descriptor
+    at a time during this scan.
+    """
+    entries: list[SourceEntry] = []
+    for i, p in enumerate(tif_paths, start=1):
+        with rasterio.open(p) as src:
+            src_crs = src.crs.to_string() if src.crs else src_crs_override
+            if src_crs is None:
+                raise RuntimeError(
+                    f"{p}: source CRS missing from file; pass --src-crs "
+                    f"(e.g. EPSG:25832 for LGL BW UTM32N)."
+                )
+            src_nodata = src.nodata if src.nodata is not None else 0.0
+            with WarpedVRT(
+                src,
+                src_crs=src_crs,
+                crs=LV95_CRS,
+                resampling=Resampling.bilinear,
+                src_nodata=src_nodata,
+                nodata=np.nan,
+            ) as vrt:
+                b = vrt.bounds
+        entries.append(SourceEntry(p, src_crs, src_nodata,
+                                   (b.left, b.bottom, b.right, b.top)))
+        if progress_every and i % progress_every == 0:
+            print(f"  scanned {i}/{len(tif_paths)} sources ...", flush=True)
+    return entries
 
 
 def tile_bounds(tx: int, tz: int, tile_size: int) -> tuple[float, float, float, float]:
@@ -103,7 +179,8 @@ def tile_bounds(tx: int, tz: int, tile_size: int) -> tuple[float, float, float, 
 
 
 def render_tile(
-    sources,
+    sources: list[SourceEntry],
+    cache: SourceCache,
     tx: int,
     tz: int,
     tile_size: int,
@@ -127,10 +204,12 @@ def render_tile(
     dst = np.full((samples, samples), np.nan, dtype=np.float32)
 
     filled = False
-    for vrt, _src, b in sources:
-        if (e_max <= b.left or e_min >= b.right or
-                n_max <= b.bottom or n_min >= b.top):
+    for entry in sources:
+        left, bottom, right, top = entry.bounds
+        if (e_max <= left or e_min >= right or
+                n_max <= bottom or n_min >= top):
             continue
+        vrt, _src = cache.get(entry)
         # Reproject this source into a NaN-initialised scratch buffer.
         # Where the source is nodata (water, out-of-coverage) we get NaN,
         # which we treat as "no info" during merge and fill later.
@@ -201,6 +280,15 @@ def main() -> int:
                         help="LV95 bounding box to convert (default: full source extent).")
     parser.add_argument("--pattern", default="*.tif,*.tiff,*.asc,*.xyz,*.vrt",
                         help="Comma-separated glob patterns when --input is a directory (recursive).")
+    parser.add_argument("--max-open-sources", type=int, default=128,
+                        help="Maximum number of source rasters kept open "
+                             "simultaneously (LRU). Lower this if you hit "
+                             "'Too many open files'. Default: 128.")
+    parser.add_argument("--resume", action="store_true", default=True,
+                        help="Skip tiles whose output .raw already exists. "
+                             "Default: on. Use --no-resume to force.")
+    parser.add_argument("--no-resume", dest="resume", action="store_false",
+                        help="Re-render every tile, even if its output exists.")
     parser.add_argument("--min-valid-fraction", type=float, default=0.5,
                         help="Minimum fraction of a tile's pixels that must "
                              "come from real source data (before inpainting) "
@@ -234,16 +322,18 @@ def main() -> int:
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    sources = open_sources(tif_files, args.src_crs)
+    print("Scanning source bounds (one open at a time) ...", flush=True)
+    sources = scan_sources(tif_files, args.src_crs)
+    cache = SourceCache(max_open=args.max_open_sources)
 
     # Determine processing extent in LV95.
     if args.extent:
         e_min, n_min, e_max, n_max = args.extent
     else:
-        e_min = min(b.left for _, _, b in sources)
-        n_min = min(b.bottom for _, _, b in sources)
-        e_max = max(b.right for _, _, b in sources)
-        n_max = max(b.top for _, _, b in sources)
+        e_min = min(s.bounds[0] for s in sources)
+        n_min = min(s.bounds[1] for s in sources)
+        e_max = max(s.bounds[2] for s in sources)
+        n_max = max(s.bounds[3] for s in sources)
     print(f"LV95 extent: E [{e_min:.0f}, {e_max:.0f}]  N [{n_min:.0f}, {n_max:.0f}]")
 
     tx_min = int(np.floor(e_min / tile_size))
@@ -254,33 +344,50 @@ def main() -> int:
     total = (tx_max - tx_min + 1) * (tz_max - tz_min + 1)
     print(f"Tile grid: tx [{tx_min}, {tx_max}]  tz [{tz_min}, {tz_max}]  ({total} candidate tiles)")
 
+    # Build a per-row spatial index so we don't iterate all 35k sources
+    # for every tile.
+    sources_by_tz: dict[int, list[SourceEntry]] = {}
+    for s in sources:
+        left, bottom, right, top = s.bounds
+        tz_lo = int(np.floor(bottom / tile_size))
+        tz_hi = int(np.floor((top - 1) / tile_size))
+        for tz in range(tz_lo, tz_hi + 1):
+            sources_by_tz.setdefault(tz, []).append(s)
+
     written = 0
     skipped = 0
+    resumed = 0
     for tz in range(tz_min, tz_max + 1):
+        row_sources = sources_by_tz.get(tz, [])
+        if not row_sources:
+            continue
         for tx in range(tx_min, tx_max + 1):
-            data = render_tile(sources, tx, tz, tile_size, samples,
-                               min_valid_fraction=args.min_valid_fraction)
-            if data is None:
-                skipped += 1
-                continue
-
-            # Match SwissTopo filename: tile_{lv95_east}_{lv95_north}.raw
             lv95_east = tx * tile_size
             lv95_north = tz * tile_size
             fname = f"tile_{lv95_east}_{lv95_north}.raw"
-            with open(output_dir / fname, "wb") as f:
+            out_path = output_dir / fname
+            if args.resume and out_path.exists():
+                resumed += 1
+                continue
+            data = render_tile(row_sources, cache, tx, tz, tile_size,
+                               samples, min_valid_fraction=args.min_valid_fraction)
+            if data is None:
+                skipped += 1
+                continue
+            tmp_path = out_path.with_suffix(".raw.tmp")
+            with open(tmp_path, "wb") as f:
                 f.write(data.astype(np.float32).tobytes())
+            tmp_path.replace(out_path)
             written += 1
 
             if written % 100 == 0:
-                print(f"  {written} tiles written, {skipped} empty skipped ...")
+                print(f"  {written} tiles written, {skipped} empty skipped, "
+                      f"{resumed} resumed ...", flush=True)
 
-    # Close sources.
-    for vrt, src, _ in sources:
-        vrt.close()
-        src.close()
+    cache.close_all()
 
-    print(f"Done: {written} tiles written to {output_dir} ({skipped} empty tiles skipped).")
+    print(f"Done: {written} tiles written to {output_dir} "
+          f"({skipped} empty tiles skipped, {resumed} pre-existing).")
     return 0
 
 

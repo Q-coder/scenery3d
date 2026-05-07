@@ -156,8 +156,9 @@ namespace godot
 		// Max number of tile results that include a JPEG ortho (decode +
 		// texture upload on the main thread) processed per frame. Without
 		// this, crossing a chunk boundary lets dozens of decodes pile into
-		// one frame and visibly stalls the simulation.
-		static constexpr int ORTHO_DECODES_PER_FRAME = 3;
+		// one frame and visibly stalls the simulation. Metal is especially
+		// sensitive to upload bursts here, so keep this conservative.
+		static constexpr int ORTHO_DECODES_PER_FRAME = 1;
 
 		// Max number of chunk results processed per frame. Each chunk
 		// decodes up to chunk_size² mip3 JPEGs and builds a composite

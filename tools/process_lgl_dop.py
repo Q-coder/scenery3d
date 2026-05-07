@@ -57,6 +57,7 @@ import numpy as np
 
 try:
     import rasterio
+    from rasterio.fill import fillnodata
     from rasterio.enums import Resampling
     from rasterio.transform import Affine
     from rasterio.vrt import WarpedVRT
@@ -340,6 +341,18 @@ def render_tile_from_zips(tx: int, tz: int, zip_paths: list[Path],
         return None
     if cover.sum() / cover.size < min_valid_fraction:
         return None
+
+    # Remove tiny internal no-coverage holes (usually 1-2 px reprojection
+    # cracks at source boundaries) so they don't become dark seam lines after
+    # JPEG encoding / mip filtering.
+    if not cover.all():
+        mask = cover.astype(np.uint8)
+        for c in range(3):
+            band = fillnodata(dst[c].astype(np.float32),
+                              mask=mask,
+                              max_search_distance=8.0,
+                              smoothing_iterations=0)
+            dst[c] = np.clip(band, 0, 255).astype(np.uint8)
 
     out = dst[:, ::-1, ::-1]
     return np.ascontiguousarray(np.transpose(out, (1, 2, 0)))

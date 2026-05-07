@@ -99,7 +99,8 @@ func _update_hud() -> void:
 	# clockwise from north, so east component is -fwd.x.
 	var fwd := -global_transform.basis.z
 	var heading_deg := fmod(rad_to_deg(atan2(-fwd.x, fwd.z)) + 360.0, 360.0)
-	var compass := ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][int(round(heading_deg / 45.0)) % 8]
+	var compass_dirs := ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+	var compass: String = compass_dirs[int(round(heading_deg / 45.0)) % 8]
 	# Pitch: positive = looking up.
 	var horiz_len := Vector2(fwd.x, fwd.z).length()
 	var pitch_deg := rad_to_deg(atan2(fwd.y, horiz_len))

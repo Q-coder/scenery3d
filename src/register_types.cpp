@@ -10,6 +10,7 @@
 #include "s3d_building_manager.h"
 #include "s3d_water_manager.h"
 #include "s3d_road_manager.h"
+#include "s3d_vegetation_manager.h"
 
 using namespace godot;
 
@@ -27,6 +28,7 @@ void initialize_scenery3d_module(ModuleInitializationLevel p_level)
 	ClassDB::register_class<S3DBuildingManager>();
 	ClassDB::register_class<S3DWaterManager>();
 	ClassDB::register_class<S3DRoadManager>();
+	ClassDB::register_class<S3DVegetationManager>();
 }
 
 void uninitialize_scenery3d_module(ModuleInitializationLevel p_level)
