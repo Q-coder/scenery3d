@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -43,6 +44,7 @@ from pathlib import Path
 
 BASE_URL = "https://opengeodata.lgl-bw.de/data/dop20"
 USER_AGENT = "scenery3d-lgl-dop-downloader/1.0"
+TILE_STEP_KM = 2
 
 # Default: Baden-Württemberg bounding box in UTM32 km (generous; 404s skipped).
 # BW extent roughly: E 432-612, N 5262-5518 km.
@@ -71,46 +73,83 @@ def http_head(url: str, timeout: float = 15.0) -> tuple[int, int]:
 
 
 def http_download(url: str, dest: Path, expected_size: int = 0,
-                  timeout: float = 600.0) -> bool:
+                  timeout: float = 600.0,
+                  retries: int = 4) -> bool:
     tmp = dest.with_suffix(dest.suffix + ".part")
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp, \
-             open(tmp, "wb") as out:
-            shutil.copyfileobj(resp, out, length=4 * 1024 * 1024)
-    except Exception as e:  # noqa: BLE001
-        if tmp.exists():
-            tmp.unlink(missing_ok=True)
-        print(f"  ERROR downloading {url}: {e}", file=sys.stderr)
-        return False
-    if expected_size and tmp.stat().st_size != expected_size:
-        print(f"  WARN size mismatch for {dest.name}: "
-              f"got {tmp.stat().st_size}, expected {expected_size}",
-              file=sys.stderr)
-    tmp.rename(dest)
-    return True
+    last_err: Exception | None = None
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp, \
+                 open(tmp, "wb") as out:
+                shutil.copyfileobj(resp, out, length=4 * 1024 * 1024)
+
+            if expected_size and tmp.stat().st_size != expected_size:
+                raise IOError(
+                    f"size mismatch for {dest.name}: got {tmp.stat().st_size}, "
+                    f"expected {expected_size}"
+                )
+
+            tmp.rename(dest)
+            return True
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            if tmp.exists():
+                tmp.unlink(missing_ok=True)
+            if attempt < retries:
+                # Exponential backoff with jitter to ride out transient
+                # server-side throttling/reset bursts.
+                sleep_s = min(60.0, (2.0 ** attempt) + random.random())
+                time.sleep(sleep_s)
+                continue
+            print(f"  ERROR downloading {url} after {retries + 1} attempt(s): "
+                  f"{e}", file=sys.stderr)
+            return False
+
+    if last_err is not None:
+        print(f"  ERROR downloading {url}: {last_err}", file=sys.stderr)
+    return False
 
 
 def enumerate_candidates(extent: tuple[int, int, int, int]) -> list[tuple[int, int]]:
-    # Same anchor as DGM: odd E, even N km. We probe every integer km;
-    # cells the server doesn't have just return 404.
+    # LGL DOP20 is anchored on odd E_km and even N_km with 2 km cell size.
+    # Enumerating only anchored starts cuts probes by 4x and avoids server
+    # throttling that can hide valid tiles behind transient network errors.
     e_min, n_min, e_max, n_max = extent
+
+    e0 = int(e_min)
+    if (e0 % 2) == 0:
+        e0 += 1
+
+    n0 = int(n_min)
+    if (n0 % 2) != 0:
+        n0 += 1
+
     cells = []
-    for e in range(int(e_min), int(e_max)):
-        for n in range(int(n_min), int(n_max)):
+    for e in range(e0, int(e_max), TILE_STEP_KM):
+        for n in range(n0, int(n_max), TILE_STEP_KM):
             cells.append((e, n))
     return cells
 
 
-def probe_and_index(candidates, workers: int):
+def probe_and_index(candidates, workers: int, retries: int = 3,
+                    timeout: float = 15.0):
     hits: list[tuple[int, int, int]] = []
     total = len(candidates)
     done = 0
     t0 = time.time()
+    transient = 0
 
     def worker(cell):
         e, n = cell
-        status, size = http_head(tile_url(e, n))
+        status, size = 0, 0
+        for attempt in range(retries + 1):
+            status, size = http_head(tile_url(e, n), timeout=timeout)
+            if status != 0:
+                break
+            if attempt < retries:
+                # Gentle linear backoff (0.5s, 1.0s, 1.5s, ...)
+                time.sleep(0.5 * (attempt + 1))
         return (e, n, status, size)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
@@ -118,15 +157,21 @@ def probe_and_index(candidates, workers: int):
             done += 1
             if status == 200:
                 hits.append((e, n, size))
+            elif status == 0:
+                transient += 1
             if done % 200 == 0 or done == total:
                 elapsed = time.time() - t0
                 rate = done / elapsed if elapsed > 0 else 0
                 print(f"  probed {done}/{total} cells, {len(hits)} hits, "
                       f"{rate:.0f}/s")
+    if transient:
+        print(f"  note: {transient} probe(s) had transient network errors "
+              f"after retries")
     return hits
 
 
-def download_all(hits, download_dir: Path, workers: int) -> list[Path]:
+def download_all(hits, download_dir: Path, workers: int,
+                 timeout: float, retries: int) -> list[Path]:
     download_dir.mkdir(parents=True, exist_ok=True)
     jobs: list[tuple[int, int, int, Path]] = []
     skipped = 0
@@ -141,7 +186,11 @@ def download_all(hits, download_dir: Path, workers: int) -> list[Path]:
 
     def worker(job):
         e, n, size, dest = job
-        ok = http_download(tile_url(e, n), dest, expected_size=size)
+        ok = http_download(tile_url(e, n),
+                           dest,
+                           expected_size=size,
+                           timeout=timeout,
+                           retries=retries)
         return (dest, ok)
 
     ok_count = 0
@@ -152,7 +201,14 @@ def download_all(hits, download_dir: Path, workers: int) -> list[Path]:
         for idx, (dest, ok) in enumerate(ex.map(worker, jobs), start=1):
             if ok:
                 ok_count += 1
-                total_bytes += dest.stat().st_size
+                # The drain watchdog may delete a freshly-arrived ZIP
+                # between download_all() finishing the download and us
+                # stat()-ing it. Treat a missing file as size 0 — the
+                # download itself succeeded.
+                try:
+                    total_bytes += dest.stat().st_size
+                except FileNotFoundError:
+                    pass
             else:
                 fail_count += 1
             if idx % 5 == 0 or idx == len(jobs):
@@ -219,9 +275,19 @@ def main() -> int:
     parser.add_argument("--probe-workers", type=int, default=8,
                         help="HEAD-probe parallelism (default: 8). LGL "
                              "rate-limits aggressive probing.")
+    parser.add_argument("--probe-retries", type=int, default=3,
+                        help="Retries for transient probe network failures "
+                            "(status 0). Default: 3.")
+    parser.add_argument("--probe-timeout", type=float, default=15.0,
+                        help="HEAD probe timeout in seconds (default: 15).")
     parser.add_argument("--download-workers", type=int, default=4,
                         help="Download parallelism (default: 4). DOPs are "
                              "much larger than DGMs so 4 is a good balance.")
+    parser.add_argument("--download-timeout", type=float, default=600.0,
+                        help="GET download timeout in seconds (default: 600).")
+    parser.add_argument("--download-retries", type=int, default=4,
+                        help="Retries for transient download failures "
+                            "(e.g. connection reset). Default: 4.")
     parser.add_argument("--process", action="store_true",
                         help="After downloading, invoke process_lgl_dop.py to "
                              "stream-convert ZIPs into ortho JPEGs.")
@@ -261,7 +327,10 @@ def main() -> int:
         print(f"      {len(cells)} candidate cells")
 
     print(f"[2/3] Probing availability with {args.probe_workers} workers")
-    hits = probe_and_index(cells, workers=args.probe_workers)
+    hits = probe_and_index(cells,
+                           workers=args.probe_workers,
+                           retries=args.probe_retries,
+                           timeout=args.probe_timeout)
     if not hits:
         print("No available tiles found for this extent. Exiting.",
               file=sys.stderr)
@@ -270,7 +339,11 @@ def main() -> int:
     print(f"      {len(hits)} tiles available (~{total_gb:.1f} GB total)")
 
     print(f"[3/3] Downloading missing ZIPs into {download_dir}")
-    download_all(hits, download_dir, workers=args.download_workers)
+    download_all(hits,
+                 download_dir,
+                 workers=args.download_workers,
+                 timeout=args.download_timeout,
+                 retries=args.download_retries)
 
     if not args.process:
         print("\nDownload complete. Next step: stream-convert with\n"

@@ -19,6 +19,7 @@ Scenery3D (Node3D)              — Main node, configuration and coordination
 ├── S3DTileManager (Node3D)     — Background thread pool, tile lifecycle, LOD rings
 │   └── S3DTile (MeshInstance3D)— Individual terrain tile with heightmap mesh
 ├── S3DBuildingManager (Node3D) — Background GLB loading, LOD, per-building visibility
+├── S3DVegetationManager (Node3D) — Per-tile forest streaming via MultiMesh instancing
 ├── S3DWaterManager (Node3D)    — Water surface tiles (rivers, lakes, streams)
 ├── S3DRoadManager (Node3D)     — Road and railway tiles with lane markings
 ├── S3DElevationDB (RefCounted) — Fast elevation lookup across all loaded tiles
@@ -70,8 +71,9 @@ JPEG decode and texture upload on the main thread. Three caps spread that work
 across many frames so the simulation never stalls:
 
 - `VERTEX_BUDGET_PER_FRAME = 200000` — mesh build cost.
-- `ORTHO_DECODES_PER_FRAME = 3` — tile results that include a JPEG ortho are
-  deferred once the per-frame quota is hit.
+- `ORTHO_DECODES_PER_FRAME = 1` — tile results that include a JPEG ortho are
+  deferred once the per-frame quota is hit. Kept intentionally conservative
+  on macOS/Metal to avoid `timeout waiting for fence` upload stalls.
 - `CHUNKS_PER_FRAME = 1` — each chunk decodes up to `chunk_size²` mip3 JPEGs
   and builds a composite texture, so one per frame is plenty.
 
@@ -93,6 +95,7 @@ Designed for SwissTopo data:
 - **Terrain elevation:** swissALTI3D (0.5m resolution)
 - **Orthophotos:** SWISSIMAGE (JPEG tiles, 1m/px full res with mip levels for LOD)
 - **Buildings:** swissBUILDINGS3D 3.0 (converted to GLB per tile)
+- **Vegetation:** swissTLM3D forest cover and isolated trees (converted to per-tile point clouds)
 - **Water:** swissTLM3D rivers, lakes, and streams (ribbon meshes with vertex colors)
 - **Roads:** swissTLM3D roads and railways (ribbon meshes with white lane markings)
 
@@ -190,6 +193,38 @@ Visual enhancements:
 
 Naming: `roads_{lv95_east}_{lv95_north}.glb` with `manifest.json`.
 
+### Vegetation Tile Format
+
+Vegetation is streamed as one binary point file per LV95 tile and rendered as
+`MultiMeshInstance3D` using a shared tree mesh:
+
+- File name: `vegetation_{lv95_east}_{lv95_north}.bin`
+- Header: tile origin plus record count
+- Per-tree record: local east/north offset, sampled ground elevation, tree
+  height, random yaw, and crown radius
+
+`S3DVegetationManager` loads these files on background threads and instantiates
+them tile-by-tile around the camera. The demo scene uses `demo/vegetation_setup.gd`
+to apply foliage-safe materials to the imported tree mesh: two-sided alpha
+scissor rendering, a small emissive lift for readability, and
+`FLAG_DONT_RECEIVE_SHADOWS` so dense tree cards do not go unnaturally dark over
+loaded orthophotos. The current demo also disables tree shadow casting on the
+vegetation `MultiMeshInstance3D` as a temporary visual workaround.
+
+#### Vegetation Extraction
+
+`tools/extract_tlm_forests.py` converts swissTLM3D forest polygons and isolated
+tree layers into the per-tile vegetation format. It samples ground elevation
+from existing `tile_{E}_{N}.raw` heightmaps so runtime placement does not need
+an elevation lookup.
+
+```bash
+python3 tools/extract_tlm_forests.py \
+  --tlm-gpkg /path/to/swissTLM3D.gpkg \
+  --alti-dir /path/to/scenery/terrain \
+  --output /path/to/scenery/vegetation
+```
+
 #### Conversion Script
 
 `scripts/convert_buildings.py` downloads swissBUILDINGS3D 3.0 tiles from the
@@ -219,11 +254,21 @@ coverage is below `--min-valid-fraction` (default 0.5) are skipped rather than
 being streak-filled from a few pixels, which prevents visible seams against
 fully-covered neighbours.
 
+`tools/xyz_to_tif.py` is a helper for bulk pre-conversion of the raw LGL ASCII
+XYZ source files to GeoTIFF before running `convert_lgl_bw.py`. This avoids the
+high open cost of GDAL's XYZ driver when scanning very large source corpora.
+
 ```bash
 python3 tools/convert_lgl_bw.py \
   --input /path/to/bw_dgm/ \
   --output /path/to/scenery/Germany/Baden-Wuertemberg/terrain \
   --src-crs EPSG:25832
+```
+
+```bash
+python3 tools/xyz_to_tif.py \
+  --input /path/to/bw_dgm_xyz/ \
+  --workers 8
 ```
 
 `tools/download_lgl_bw.py` automates the full pipeline: HEAD-probe the LGL Open

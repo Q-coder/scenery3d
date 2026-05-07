@@ -33,7 +33,7 @@ DOP_PID=${DOP_PID:-}
 
 cd "$(dirname "$0")/.."
 
-log() { print -- "[$(date '+%H:%M:%S')] $*" | tee -a "$LOG"; }
+log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*" | tee -a "$LOG"; }
 
 free_gb() {
     df -g "$DATA_VOLUME" | awk 'NR==2 {print $4}'

@@ -416,44 +416,68 @@ void S3DTileManager::worker_func()
 			}
 
 			// Fill remaining zero-elevation gaps (nodata from BW DGM etc.)
-			// by propagating from nearest valid neighbours.  The raw tile
-			// is 1024×1024; a full flood-fill would be expensive, so we
-			// do a simple 4-pass sweep (→, ←, ↓, ↑) that copies the
-			// previous valid sample along each scanline direction.
+			// by inverse-distance interpolation from the four nearest
+			// valid samples along the row and column. Previously we did a
+			// 4-pass smear that simply copied the last valid sample into
+			// each gap; for slanted wedges of nodata (caused by missing
+			// UTM32 source cells projecting diagonally into LV95) that
+			// stretches a single edge sample across hundreds of columns,
+			// producing the long horizontal streaks visible in BW.
 			if (result.success) {
 				float *d = reinterpret_cast<float *>(result.raw_bytes.data());
 				int sz = req.tile_size;
-				// Horizontal passes (row-wise).
+				size_t total = (size_t)sz * sz;
+				std::vector<float> Lv(total, 0.0f), Rv(total, 0.0f);
+				std::vector<float> Uv(total, 0.0f), Dv(total, 0.0f);
+				std::vector<int> Ld(total, 0), Rd(total, 0);
+				std::vector<int> Ud(total, 0), Dd(total, 0);
+				// Horizontal scans (per row).
 				for (int r = 0; r < sz; r++) {
-					// Left to right.
-					float last = 0.0f;
+					float v = 0.0f; int dist = 0; bool have = false;
 					for (int c = 0; c < sz; c++) {
-						float &v = d[r * sz + c];
-						if (v != 0.0f) last = v;
-						else if (last != 0.0f) v = last;
+						size_t i = (size_t)r * sz + c;
+						if (d[i] != 0.0f) { v = d[i]; dist = 0; have = true; }
+						else if (have) { dist++; }
+						if (have && d[i] == 0.0f) { Lv[i] = v; Ld[i] = dist; }
 					}
-					// Right to left.
-					last = 0.0f;
+					v = 0.0f; dist = 0; have = false;
 					for (int c = sz - 1; c >= 0; c--) {
-						float &v = d[r * sz + c];
-						if (v != 0.0f) last = v;
-						else if (last != 0.0f) v = last;
+						size_t i = (size_t)r * sz + c;
+						if (d[i] != 0.0f) { v = d[i]; dist = 0; have = true; }
+						else if (have) { dist++; }
+						if (have && d[i] == 0.0f) { Rv[i] = v; Rd[i] = dist; }
 					}
 				}
-				// Vertical passes (column-wise) for remaining gaps.
+				// Vertical scans (per column).
 				for (int c = 0; c < sz; c++) {
-					float last = 0.0f;
+					float v = 0.0f; int dist = 0; bool have = false;
 					for (int r = 0; r < sz; r++) {
-						float &v = d[r * sz + c];
-						if (v != 0.0f) last = v;
-						else if (last != 0.0f) v = last;
+						size_t i = (size_t)r * sz + c;
+						if (d[i] != 0.0f) { v = d[i]; dist = 0; have = true; }
+						else if (have) { dist++; }
+						if (have && d[i] == 0.0f) { Uv[i] = v; Ud[i] = dist; }
 					}
-					last = 0.0f;
+					v = 0.0f; dist = 0; have = false;
 					for (int r = sz - 1; r >= 0; r--) {
-						float &v = d[r * sz + c];
-						if (v != 0.0f) last = v;
-						else if (last != 0.0f) v = last;
+						size_t i = (size_t)r * sz + c;
+						if (d[i] != 0.0f) { v = d[i]; dist = 0; have = true; }
+						else if (have) { dist++; }
+						if (have && d[i] == 0.0f) { Dv[i] = v; Dd[i] = dist; }
 					}
+				}
+				// Inverse-distance blend of whichever directions found a
+				// valid neighbour. A 1-pixel-away sample dominates a
+				// 100-pixel-away sample, so this approximates linear
+				// interpolation across narrow gaps and graceful blending
+				// across larger ones.
+				for (size_t i = 0; i < total; i++) {
+					if (d[i] != 0.0f) continue;
+					float num = 0.0f, den = 0.0f;
+					if (Lv[i] != 0.0f) { float w = 1.0f / (float)Ld[i]; num += Lv[i] * w; den += w; }
+					if (Rv[i] != 0.0f) { float w = 1.0f / (float)Rd[i]; num += Rv[i] * w; den += w; }
+					if (Uv[i] != 0.0f) { float w = 1.0f / (float)Ud[i]; num += Uv[i] * w; den += w; }
+					if (Dv[i] != 0.0f) { float w = 1.0f / (float)Dd[i]; num += Dv[i] * w; den += w; }
+					if (den > 0.0f) d[i] = num / den;
 				}
 			}
 
