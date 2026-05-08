@@ -81,6 +81,8 @@ func _load_mesh_from_scene_path(path: String) -> Mesh:
 func _find_first_mesh_recursive(node: Node) -> Mesh:
 	if node is MeshInstance3D:
 		var mi := node as MeshInstance3D
+		print("DEBUG: found MeshInstance3D '%s' mesh=%s surfaces=%d" % [
+			mi.name, mi.mesh, (mi.mesh.get_surface_count() if mi.mesh != null else -1)])
 		if mi.mesh != null:
 			return mi.mesh
 
@@ -98,26 +100,44 @@ func _brighten_mesh_materials(mesh: Mesh) -> void:
 	if mesh == null:
 		return
 	
+	print("DEBUG: mesh class=%s surface_count=%d" % [mesh.get_class(), mesh.get_surface_count()])
 	for i in range(mesh.get_surface_count()):
 		var mat = mesh.surface_get_material(i)
+		var mat_class := "<null>"
+		if mat != null:
+			mat_class = mat.get_class()
+		print("DEBUG: surface %d material class=%s" % [i, mat_class])
+		if mat is StandardMaterial3D:
+			var sm := mat as StandardMaterial3D
+			print("DEBUG:   albedo_color=%s albedo_texture=%s transparency=%d cull=%d" % [
+				sm.albedo_color, sm.albedo_texture, sm.transparency, sm.cull_mode])
 		if mat is StandardMaterial3D:
 			var std_mat := (mat as StandardMaterial3D).duplicate()
-			# Keep leaves visible from both sides (common for card-based foliage).
-			std_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-			# Ignore incoming terrain shadows for now; dense card foliage reads
-			# better than the current overly dark result.
+			# Always: ignore terrain shadows so the forest doesn't go black
+			# over loaded orthophotos.
 			std_mat.set_flag(BaseMaterial3D.FLAG_DONT_RECEIVE_SHADOWS, true)
-			# Use cutout transparency to stabilize leaf texture rendering.
-			std_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
-			std_mat.alpha_scissor_threshold = 0.35
-			# Small green-tinted emission for readability, not a gray wash.
-			std_mat.emission_enabled = true
-			std_mat.emission = Color(0.08, 0.12, 0.08, 1.0)
-			std_mat.emission_energy_multiplier = 0.25
-			std_mat.roughness = clamp(std_mat.roughness, 0.5, 1.0)
-			std_mat.metallic = 0.0
+			var albedo_tex = std_mat.albedo_texture
+			var has_alpha: bool = albedo_tex != null and (
+				std_mat.transparency != BaseMaterial3D.TRANSPARENCY_DISABLED
+			)
+			if albedo_tex != null:
+				# Imported tree GLB materials already have correct textures
+				# and alpha settings — don't override them. Just enforce the
+				# two-sided cull for any surface that uses alpha (foliage cards).
+				if has_alpha:
+					std_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+				print("DEBUG: surface %d has albedo texture, preserving material" % i)
+			else:
+				# Untextured surface (e.g. procedural-leaf material from Blender
+				# that didn't export a texture). Tint it leaf-green so it
+				# doesn't render solid white.
+				std_mat.albedo_color = Color(0.22, 0.36, 0.18, 1.0)
+				std_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+				std_mat.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
+				std_mat.roughness = clamp(std_mat.roughness, 0.7, 1.0)
+				std_mat.metallic = 0.0
+				print("DEBUG: surface %d had no albedo texture, applied green tint" % i)
 			mesh.surface_set_material(i, std_mat)
-			print("DEBUG: adjusted foliage material surface %d" % i)
 		elif mat == null:
 			# No material assigned, create a simple foliage-safe fallback.
 			var new_mat := StandardMaterial3D.new()

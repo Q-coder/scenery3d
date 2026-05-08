@@ -7,8 +7,7 @@
 background_mode = 1
 background_color = Color(0.53, 0.66, 0.82, 1)
 ambient_light_source = 1
-ambient_light_color = Color(0.65, 0.70, 0.80, 1)
-ambient_light_energy = 1.0
+ambient_light_color = Color(0.65, 0.7, 0.8, 1)
 
 [sub_resource type="LabelSettings" id="LabelSettings_ig7tw"]
 
@@ -26,13 +25,12 @@ orthophoto_paths = PackedStringArray("/Users/gery/provpilot/scenery/Switzerland/
 
 [node name="Vegetation" type="S3DVegetationManager" parent="." unique_id=1473369701]
 vegetation_paths = PackedStringArray("/Users/gery/provpilot/scenery/Switzerland/vegetation")
-origin_east = 2600000.0
-origin_north = 1200000.0
 load_radius_m = 1500
 scale_jitter = 0.15
 height_to_mesh_unit = 0.08
+mesh_pitch_deg = 90.0
 script = ExtResource("2")
-tree_scene_path = "/Users/gery/provpilot/scenery/Switzerland/trees/tree_lod2.glb"
+tree_scene_path = "uid://cy813dmnfeo1m"
 
 [node name="Camera3D" type="Camera3D" parent="." unique_id=1436725578]
 transform = Transform3D(-1, 0, 0, 0, 0.9619943601474612, 0.27306931545758983, 0, 0.27306931545758983, -0.9619943601474612, -90000, 1500, 83000)

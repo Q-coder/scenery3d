@@ -247,8 +247,8 @@ def main() -> int:
                              "Produced e.g. by tools/find_missing_bw_tiles.py.")
     parser.add_argument("--probe-workers", type=int, default=32,
                         help="HEAD-probe parallelism (default: 32).")
-    parser.add_argument("--download-workers", type=int, default=8,
-                        help="Download parallelism (default: 8).")
+    parser.add_argument("--download-workers", type=int, default=16,
+                        help="Download parallelism (default: 16).")
     parser.add_argument("--xyz-workers", type=int, default=8,
                         help="XYZ→GeoTIFF parallelism (default: 8).")
     parser.add_argument("--no-convert", action="store_true",

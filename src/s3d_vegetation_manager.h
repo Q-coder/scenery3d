@@ -93,6 +93,13 @@ namespace godot
 		                                   // to mesh scale Y. If your mesh is
 		                                   // 1 m tall, leave at 1.0; if 10 m
 		                                   // tall, set to 0.1.
+		// Pre-rotation around the X axis applied to every instance, degrees.
+		// Use 90 for Blender/glTF assets exported with Z-up so trunks point
+		// up in Godot's Y-up world.
+		double mesh_pitch_deg = 0.0;
+		// Fraction of trees per tile to actually render (0..1). Selection is
+		// deterministic per tile, so toggling at runtime gives a stable subset.
+		double density_fraction = 1.0;
 
 		// Last camera position.
 		double last_cam_e = 0;
@@ -134,6 +141,12 @@ namespace godot
 
 		void set_height_to_mesh_unit(double p_v);
 		double get_height_to_mesh_unit() const;
+
+		void set_mesh_pitch_deg(double p_v);
+		double get_mesh_pitch_deg() const;
+
+		void set_density_fraction(double p_v);
+		double get_density_fraction() const;
 
 		int get_active_tile_count() const;
 	};
