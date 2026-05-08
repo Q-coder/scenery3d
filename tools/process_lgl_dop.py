@@ -297,11 +297,29 @@ def render_tile_from_zips(tx: int, tz: int, zip_paths: list[Path],
                     continue
                 if src.count < 3:
                     continue
+                # Alpha-aware warp.
+                # GDAL's bilinear resampling of a source TIFF without
+                # nodata treats out-of-bounds reads as zero and blends
+                # them with real source pixels, producing a 1–3 px dark
+                # fringe at every UTM cell boundary. With ``add_alpha``,
+                # GDAL warps an automatically-generated alpha band along
+                # with RGB. At an edge pixel where bilinear samples
+                # cross the source boundary, ``alpha`` drops to a value
+                # proportional to in-source coverage and the RGB output
+                # equals (true_color * alpha / 255). Dividing RGB by
+                # alpha recovers the true source color, and we pick the
+                # highest-alpha source per destination pixel so a
+                # neighbouring tile's clean interior overwrites the
+                # current source's darkened fringe.
                 with WarpedVRT(src,
                                src_crs=src.crs or SRC_CRS,
                                crs=LV95_CRS,
-                               resampling=Resampling.bilinear) as vrt:
-                    tmp = np.zeros_like(dst)
+                               resampling=Resampling.bilinear,
+                               add_alpha=True) as vrt:
+                    tmp = np.zeros((3, MIP0_PX, MIP0_PX), dtype=np.uint8)
+                    tmp_q = np.zeros((MIP0_PX, MIP0_PX), dtype=np.uint8)
+                    # Bands 1..3 = RGB, band vrt.count = alpha.
+                    alpha_band = vrt.count
                     for band_idx in range(3):
                         reproject(
                             source=rasterio.band(vrt, band_idx + 1),
@@ -310,23 +328,26 @@ def render_tile_from_zips(tx: int, tz: int, zip_paths: list[Path],
                             dst_crs=LV95_CRS,
                             resampling=Resampling.bilinear,
                         )
-
-                    # Reproject a unit mask covering the full source
-                    # extent. Bilinear resampling of a 0/255 mask gives
-                    # 255 in fully-covered interior, 1..254 along the
-                    # bilinear edge, and 0 outside.
-                    src_mask = np.full(
-                        (vrt.height, vrt.width), 255, dtype=np.uint8)
-                    tmp_q = np.zeros((MIP0_PX, MIP0_PX), dtype=np.uint8)
                     reproject(
-                        source=src_mask,
+                        source=rasterio.band(vrt, alpha_band),
                         destination=tmp_q,
-                        src_transform=vrt.transform,
-                        src_crs=LV95_CRS,
                         dst_transform=dst_transform,
                         dst_crs=LV95_CRS,
                         resampling=Resampling.bilinear,
                     )
+
+                    # Recover unmultiplied source color where alpha is
+                    # non-zero but partial. RGB_out = true_RGB * a/255,
+                    # so true_RGB = RGB_out * 255 / a (clamped to 255).
+                    partial = (tmp_q > 0) & (tmp_q < 255)
+                    if partial.any():
+                        # Compute scale = 255 / alpha for partial pixels.
+                        a = tmp_q[partial].astype(np.float32)
+                        scale = 255.0 / a
+                        for c in range(3):
+                            v = tmp[c][partial].astype(np.float32) * scale
+                            tmp[c][partial] = np.clip(
+                                v, 0.0, 255.0).astype(np.uint8)
 
                     upgrade = tmp_q > best_q
                     if upgrade.any():
