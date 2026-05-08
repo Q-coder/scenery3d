@@ -10,7 +10,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
+#include <functional>
 #include <fstream>
 
 using namespace godot;
@@ -281,12 +283,38 @@ void S3DVegetationManager::process_load_results()
 		mm->set_use_colors(false);
 		mm->set_use_custom_data(false);
 		mm->set_mesh(tree_mesh);
-		mm->set_instance_count((int)result.trees.size());
+
+		// Apply density_fraction by deterministically selecting a subset of
+		// trees per tile. Same trees are kept across density changes for
+		// stable visuals. Hash combines tile id with instance index.
+		const double frac = std::clamp(density_fraction, 0.0, 1.0);
+		std::vector<size_t> keep_indices;
+		keep_indices.reserve(result.trees.size());
+		if (frac >= 1.0) {
+			keep_indices.resize(result.trees.size());
+			for (size_t i = 0; i < result.trees.size(); i++) keep_indices[i] = i;
+		} else if (frac > 0.0) {
+			const uint32_t threshold = (uint32_t)(frac * 4294967295.0);
+			const uint32_t tile_hash = (uint32_t)std::hash<std::string>{}(result.tile_id);
+			for (size_t i = 0; i < result.trees.size(); i++) {
+				uint32_t h = (uint32_t)(i * 2654435761u) ^ tile_hash;
+				h ^= h >> 13;
+				h *= 2246822519u;
+				h ^= h >> 16;
+				if (h <= threshold) keep_indices.push_back(i);
+			}
+		}
+		if (keep_indices.empty()) {
+			st.no_data = true;
+			continue;
+		}
+		mm->set_instance_count((int)keep_indices.size());
 
 		double dx_world = origin_east - result.tile_east;
 		double dz_world = result.tile_north - origin_north;
 
-		for (size_t i = 0; i < result.trees.size(); i++) {
+		for (size_t k = 0; k < keep_indices.size(); k++) {
+			size_t i = keep_indices[k];
 			const TreeInstance &t = result.trees[i];
 			// World position. Note coordinate convention used by other
 			// managers: world_x = origin_east - east, world_z = north - origin_north.
@@ -308,10 +336,13 @@ void S3DVegetationManager::process_load_results()
 			scale_xz *= j;
 
 			Basis b;
+			if (mesh_pitch_deg != 0.0) {
+				b = b.rotated(Vector3(1, 0, 0), (float)(mesh_pitch_deg * 0.017453292519943295));
+			}
 			b = b.rotated(Vector3(0, 1, 0), t.yaw_rad);
 			b = b.scaled(Vector3(scale_xz, scale_y, scale_xz));
 			Transform3D xf(b, Vector3(wx, wy, wz));
-			mm->set_instance_transform((int)i, xf);
+			mm->set_instance_transform((int)k, xf);
 		}
 
 		MultiMeshInstance3D *mmi = memnew(MultiMeshInstance3D);
@@ -396,6 +427,20 @@ void S3DVegetationManager::_bind_methods()
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "height_to_mesh_unit"),
 	             "set_height_to_mesh_unit", "get_height_to_mesh_unit");
 
+	ClassDB::bind_method(D_METHOD("set_mesh_pitch_deg", "v"),
+	                     &S3DVegetationManager::set_mesh_pitch_deg);
+	ClassDB::bind_method(D_METHOD("get_mesh_pitch_deg"),
+	                     &S3DVegetationManager::get_mesh_pitch_deg);
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "mesh_pitch_deg"),
+	             "set_mesh_pitch_deg", "get_mesh_pitch_deg");
+
+	ClassDB::bind_method(D_METHOD("set_density_fraction", "v"),
+	                     &S3DVegetationManager::set_density_fraction);
+	ClassDB::bind_method(D_METHOD("get_density_fraction"),
+	                     &S3DVegetationManager::get_density_fraction);
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "density_fraction"),
+	             "set_density_fraction", "get_density_fraction");
+
 	ClassDB::bind_method(D_METHOD("get_active_tile_count"),
 	                     &S3DVegetationManager::get_active_tile_count);
 }
@@ -423,5 +468,21 @@ double S3DVegetationManager::get_scale_jitter() const { return scale_jitter; }
 
 void S3DVegetationManager::set_height_to_mesh_unit(double v) { height_to_mesh_unit = v; }
 double S3DVegetationManager::get_height_to_mesh_unit() const { return height_to_mesh_unit; }
+
+void S3DVegetationManager::set_mesh_pitch_deg(double v) { mesh_pitch_deg = v; }
+double S3DVegetationManager::get_mesh_pitch_deg() const { return mesh_pitch_deg; }
+
+void S3DVegetationManager::set_density_fraction(double v) {
+	double newv = std::clamp(v, 0.0, 1.0);
+	if (std::abs(newv - density_fraction) < 1e-6) return;
+	density_fraction = newv;
+	// Drop all currently loaded tiles so update_tiles repopulates them
+	// using the new density on the next process tick.
+	for (auto &kv : tiles) {
+		if (kv.second.node) kv.second.node->queue_free();
+	}
+	tiles.clear();
+}
+double S3DVegetationManager::get_density_fraction() const { return density_fraction; }
 
 int S3DVegetationManager::get_active_tile_count() const { return (int)tiles.size(); }
