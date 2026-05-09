@@ -289,9 +289,10 @@ def render_tile_from_zips(tx: int, tz: int, zip_paths: list[Path],
                 continue
             try:
                 # Quick UTM-bounds check before warping.
+                src_crs = src.crs or SRC_CRS
                 lb, bb, rb, tb = transform_bounds(
-                    src.crs or SRC_CRS, LV95_CRS,
-                    *src.bounds, densify_pts=11)
+                    src_crs, LV95_CRS,
+                    *src.bounds, densify_pts=21)
                 if (rb <= e_min or lb >= e_max
                         or tb <= n_min or bb >= n_max):
                     continue
@@ -311,11 +312,28 @@ def render_tile_from_zips(tx: int, tz: int, zip_paths: list[Path],
                 # highest-alpha source per destination pixel so a
                 # neighbouring tile's clean interior overwrites the
                 # current source's darkened fringe.
+                #
+                # We must also pass an explicit ``transform`` / size to
+                # ``WarpedVRT``: GDAL's auto-computed output extent for
+                # a rotated CRS (UTM32 → LV95) systematically truncates
+                # the reprojected source by ~150 m along its rotated
+                # edges. Pixels of the destination tile that fall
+                # within this truncated strip return alpha=0 and stay
+                # black. Sizing the VRT to the densely-projected source
+                # bounds eliminates this and keeps the LV95 tiles fully
+                # covered.
+                src_px = abs(src.transform.a)
+                src_w = int(round((rb - lb) / src_px))
+                src_h = int(round((tb - bb) / src_px))
+                src_xform = Affine(src_px, 0, lb, 0, -src_px, tb)
                 with WarpedVRT(src,
-                               src_crs=src.crs or SRC_CRS,
+                               src_crs=src_crs,
                                crs=LV95_CRS,
                                resampling=Resampling.bilinear,
-                               add_alpha=True) as vrt:
+                               add_alpha=True,
+                               transform=src_xform,
+                               width=src_w,
+                               height=src_h) as vrt:
                     tmp = np.zeros((3, MIP0_PX, MIP0_PX), dtype=np.uint8)
                     tmp_q = np.zeros((MIP0_PX, MIP0_PX), dtype=np.uint8)
                     # Bands 1..3 = RGB, band vrt.count = alpha.
