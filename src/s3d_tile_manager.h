@@ -93,6 +93,11 @@ namespace godot
 			int composite_res = 0;
 			// Orthophoto JPEG bytes (empty = no ortho).
 			std::vector<uint8_t> jpeg_bytes;
+			// Pre-decoded composited RGB bytes (used when skip_white_pixels
+			// merges multiple sources in the worker). When non-empty,
+			// jpeg_bytes is ignored. Layout: row-major RGB8, ortho_rgb_w² px.
+			std::vector<uint8_t> ortho_rgb;
+			int ortho_rgb_w = 0;
 			// Target in-memory ortho texture size in pixels (-1 if none).
 			int ortho_pixels = -1;
 			// Per-tile ortho JPEGs for chunk compositing.
@@ -128,6 +133,14 @@ namespace godot
 		// first existing file wins. Lets CH SWISSIMAGE and DE LGL DOP20
 		// coexist seamlessly across the border.
 		PackedStringArray orthophoto_paths;
+
+		// When true and 2+ orthophoto paths are configured, the worker
+		// decodes every candidate JPEG and composites them: pure white
+		// (255,255,255) pixels in higher-priority sources are filled in
+		// from lower-priority ones. SWISSIMAGE encodes German territory at
+		// the CH/DE border as white pixels (up to 43% of a 1024² tile),
+		// so this lets BW DOP20 fill those gaps cleanly.
+		bool skip_white_pixels = true;
 
 		// Build the list of candidate ortho file paths (one per data root)
 		// for a given tile + LOD. Worker tries them in order.
@@ -235,6 +248,9 @@ namespace godot
 
 		void set_orthophoto_paths(const PackedStringArray &p_paths);
 		PackedStringArray get_orthophoto_paths() const;
+
+		void set_skip_white_pixels(bool p_skip);
+		bool get_skip_white_pixels() const;
 
 		void set_elevation_db(Ref<S3DElevationDB> p_db);
 		Ref<S3DElevationDB> get_elevation_db() const;
