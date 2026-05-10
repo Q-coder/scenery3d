@@ -35,6 +35,7 @@ namespace godot
 		PackedStringArray road_paths;
 		String orthophoto_path;
 		PackedStringArray orthophoto_paths;
+		bool skip_white_pixels = true;
 
 		S3DTileManager *tile_manager = nullptr;
 		S3DBuildingManager *building_manager = nullptr;
@@ -96,6 +97,9 @@ namespace godot
 
 		void set_orthophoto_paths(const PackedStringArray &p_paths);
 		PackedStringArray get_orthophoto_paths() const;
+
+		void set_skip_white_pixels(bool p_skip);
+		bool get_skip_white_pixels() const;
 
 		// Building visibility control.
 		void hide_building(const String &uuid);

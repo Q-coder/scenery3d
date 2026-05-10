@@ -484,8 +484,22 @@ void S3DTileManager::worker_func()
 			// Load orthophoto JPEG: try each candidate path, first that
 			// opens and reads cleanly wins. Lets CH SWISSIMAGE and DE
 			// LGL DOP20 share the same tile grid.
+			//
+			// When skip_white_pixels is enabled and 2+ candidates exist,
+			// every candidate is decoded and pure-white (255,255,255)
+			// pixels in higher-priority sources are filled in from
+			// lower-priority ones. SWISSIMAGE encodes German territory
+			// at the CH/DE border as solid white (up to 43% of a 1024²
+			// tile); without this, that white shows through even when
+			// BW DOP20 covers the same area.
 			if (result.success && !req.ortho_paths.empty()) {
+				const bool composite_mode = skip_white_pixels && req.ortho_paths.size() >= 2;
+				Ref<Image> composite_img;
+				bool any_white_left = true;
+
 				for (const auto &cand : req.ortho_paths) {
+					if (composite_mode && composite_img.is_valid() && !any_white_left) break;
+
 					std::ifstream jpf(cand, std::ios::binary | std::ios::ate);
 					if (!jpf.is_open()) continue;
 					size_t fsize = (size_t)jpf.tellg();
@@ -494,9 +508,75 @@ void S3DTileManager::worker_func()
 					std::vector<uint8_t> jbuf(fsize);
 					jpf.read(reinterpret_cast<char *>(jbuf.data()), fsize);
 					if ((size_t)jpf.gcount() != fsize) continue;
-					result.jpeg_bytes = std::move(jbuf);
+
+					if (!composite_mode) {
+						// Fast path: original first-hit-wins behaviour.
+						result.jpeg_bytes = std::move(jbuf);
+						result.ortho_pixels = req.ortho_pixels;
+						break;
+					}
+
+					// Composite path: decode and merge into composite.
+					PackedByteArray jpkg;
+					jpkg.resize((int)jbuf.size());
+					memcpy(jpkg.ptrw(), jbuf.data(), jbuf.size());
+					Ref<Image> img = Image::create_empty(1, 1, false, Image::FORMAT_RGB8);
+					if (img->load_jpg_from_buffer(jpkg) != OK) continue;
+					if (img->get_width() < 2) continue;
+					if (img->get_format() != Image::FORMAT_RGB8) {
+						img->convert(Image::FORMAT_RGB8);
+					}
+
+					if (composite_img.is_null()) {
+						composite_img = img;
+					} else {
+						// Same dimensions required to fill pixel-for-pixel.
+						if (img->get_width() != composite_img->get_width()
+								|| img->get_height() != composite_img->get_height()) {
+							continue;
+						}
+						PackedByteArray cdata = composite_img->get_data();
+						PackedByteArray idata = img->get_data();
+						uint8_t *cp = cdata.ptrw();
+						const uint8_t *ip = idata.ptr();
+						int npx = composite_img->get_width() * composite_img->get_height();
+						for (int i = 0; i < npx; i++) {
+							int idx = i * 3;
+							if (cp[idx] == 255 && cp[idx + 1] == 255 && cp[idx + 2] == 255) {
+								cp[idx]     = ip[idx];
+								cp[idx + 1] = ip[idx + 1];
+								cp[idx + 2] = ip[idx + 2];
+							}
+						}
+						composite_img = Image::create_from_data(
+							composite_img->get_width(), composite_img->get_height(),
+							false, Image::FORMAT_RGB8, cdata);
+					}
+
+					// Quick scan: any white pixels remaining? If not, stop.
+					{
+						PackedByteArray cdata = composite_img->get_data();
+						const uint8_t *cp = cdata.ptr();
+						int npx = composite_img->get_width() * composite_img->get_height();
+						bool found = false;
+						// Sample stride to keep this cheap; full check on small images.
+						int step = npx > 4096 ? 16 : 1;
+						for (int i = 0; i < npx; i += step) {
+							int idx = i * 3;
+							if (cp[idx] == 255 && cp[idx + 1] == 255 && cp[idx + 2] == 255) {
+								found = true;
+								break;
+							}
+						}
+						any_white_left = found;
+					}
+				}
+
+				if (composite_mode && composite_img.is_valid()) {
+					PackedByteArray cdata = composite_img->get_data();
+					result.ortho_rgb.assign(cdata.ptr(), cdata.ptr() + cdata.size());
+					result.ortho_rgb_w = composite_img->get_width();
 					result.ortho_pixels = req.ortho_pixels;
-					break;
 				}
 			}
 		}
@@ -723,7 +803,34 @@ void S3DTileManager::process_load_results(int &verts_generated)
 		// the tile was originally created with, so the material must be
 		// refreshed — otherwise tiles loaded at mip2/mip3 stay blurry even
 		// after the camera moves into their mip0 range.
-		if (!result.jpeg_bytes.empty()) {
+		if (!result.ortho_rgb.empty() && result.ortho_rgb_w > 0) {
+			// Pre-decoded composite from worker (skip_white_pixels merge of
+			// multiple ortho sources). Skip JPEG decode entirely.
+			int w = result.ortho_rgb_w;
+			PackedByteArray rgb;
+			rgb.resize((int)result.ortho_rgb.size());
+			memcpy(rgb.ptrw(), result.ortho_rgb.data(), result.ortho_rgb.size());
+			result.ortho_rgb.clear();
+			result.jpeg_bytes.clear();
+
+			Ref<Image> ortho_img = Image::create_from_data(w, w, false, Image::FORMAT_RGB8, rgb);
+			if (ortho_img.is_valid() && ortho_img->get_width() > 1) {
+				int target_px = result.ortho_pixels;
+				if (target_px > 0 && ortho_img->get_width() > target_px) {
+					ortho_img->resize(target_px, target_px, Image::INTERPOLATE_BILINEAR);
+				}
+				ortho_img->generate_mipmaps();
+				Ref<ImageTexture> tex = ImageTexture::create_from_image(ortho_img);
+				Ref<StandardMaterial3D> mat;
+				mat.instantiate();
+				mat->set_texture(StandardMaterial3D::TEXTURE_ALBEDO, tex);
+				mat->set_cull_mode(StandardMaterial3D::CULL_DISABLED);
+				mat->set_texture_filter(BaseMaterial3D::TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC);
+				state.node->set_material(mat);
+				state.current_ortho_pixels = result.ortho_pixels;
+				ortho_decodes++;
+			}
+		} else if (!result.jpeg_bytes.empty()) {
 			PackedByteArray jpeg_arr;
 			jpeg_arr.resize(result.jpeg_bytes.size());
 			memcpy(jpeg_arr.ptrw(), result.jpeg_bytes.data(), result.jpeg_bytes.size());
@@ -823,6 +930,10 @@ void S3DTileManager::_bind_methods()
 	ClassDB::bind_method(D_METHOD("set_orthophoto_paths", "paths"), &S3DTileManager::set_orthophoto_paths);
 	ClassDB::bind_method(D_METHOD("get_orthophoto_paths"), &S3DTileManager::get_orthophoto_paths);
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_STRING_ARRAY, "orthophoto_paths"), "set_orthophoto_paths", "get_orthophoto_paths");
+
+	ClassDB::bind_method(D_METHOD("set_skip_white_pixels", "skip"), &S3DTileManager::set_skip_white_pixels);
+	ClassDB::bind_method(D_METHOD("get_skip_white_pixels"), &S3DTileManager::get_skip_white_pixels);
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "skip_white_pixels"), "set_skip_white_pixels", "get_skip_white_pixels");
 }
 
 // --- _process ---
@@ -1314,6 +1425,16 @@ void S3DTileManager::set_orthophoto_paths(const PackedStringArray &p_paths)
 PackedStringArray S3DTileManager::get_orthophoto_paths() const
 {
 	return orthophoto_paths;
+}
+
+void S3DTileManager::set_skip_white_pixels(bool p_skip)
+{
+	skip_white_pixels = p_skip;
+}
+
+bool S3DTileManager::get_skip_white_pixels() const
+{
+	return skip_white_pixels;
 }
 
 void S3DTileManager::set_elevation_db(Ref<S3DElevationDB> p_db)
