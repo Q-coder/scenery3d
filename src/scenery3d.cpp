@@ -58,6 +58,10 @@ void Scenery3D::_bind_methods()
 	ClassDB::bind_method(D_METHOD("get_buildings_path"), &Scenery3D::get_buildings_path);
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "buildings_path"), "set_buildings_path", "get_buildings_path");
 
+	ClassDB::bind_method(D_METHOD("set_buildings_paths", "paths"), &Scenery3D::set_buildings_paths);
+	ClassDB::bind_method(D_METHOD("get_buildings_paths"), &Scenery3D::get_buildings_paths);
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_STRING_ARRAY, "buildings_paths"), "set_buildings_paths", "get_buildings_paths");
+
 	ClassDB::bind_method(D_METHOD("set_water_paths", "paths"), &Scenery3D::set_water_paths);
 	ClassDB::bind_method(D_METHOD("get_water_paths"), &Scenery3D::get_water_paths);
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_STRING_ARRAY, "water_paths"), "set_water_paths", "get_water_paths");
@@ -142,25 +146,26 @@ void Scenery3D::_ready()
 	coords->set_origin_north(origin_north);
 
 	// Create the building manager.
-	if (!buildings_path.is_empty()) {
-		building_manager = memnew(S3DBuildingManager);
-		add_child(building_manager);
-		building_manager->set_buildings_path(buildings_path);
-		building_manager->set_origin_east(origin_east);
-		building_manager->set_origin_north(origin_north);
-	} else {
-		// Try project setting fallback.
+	// Resolve buildings_paths: if empty, fall back to buildings_path (single),
+	// then to ProjectSettings.
+	if (buildings_paths.is_empty() && !buildings_path.is_empty()) {
+		buildings_paths.push_back(buildings_path);
+	}
+	if (buildings_paths.is_empty()) {
 		ProjectSettings *ps = ProjectSettings::get_singleton();
 		if (ps && ps->has_setting("scenery3d/buildings_path")) {
-			buildings_path = ps->get_setting("scenery3d/buildings_path");
-			if (!buildings_path.is_empty()) {
-				building_manager = memnew(S3DBuildingManager);
-				add_child(building_manager);
-				building_manager->set_buildings_path(buildings_path);
-				building_manager->set_origin_east(origin_east);
-				building_manager->set_origin_north(origin_north);
+			String p = ps->get_setting("scenery3d/buildings_path");
+			if (!p.is_empty()) {
+				buildings_paths.push_back(p);
 			}
 		}
+	}
+	if (!buildings_paths.is_empty()) {
+		building_manager = memnew(S3DBuildingManager);
+		add_child(building_manager);
+		building_manager->set_buildings_paths(buildings_paths);
+		building_manager->set_origin_east(origin_east);
+		building_manager->set_origin_north(origin_north);
 	}
 
 	// Create the water manager.
@@ -178,6 +183,7 @@ void Scenery3D::_ready()
 		add_child(water_manager);
 		water_manager->set_origin_east(origin_east);
 		water_manager->set_origin_north(origin_north);
+		water_manager->set_elevation_db(elevation_db);
 		water_manager->set_water_paths(water_paths);
 	}
 
@@ -300,6 +306,19 @@ void Scenery3D::set_buildings_path(const String &p_path)
 String Scenery3D::get_buildings_path() const
 {
 	return buildings_path;
+}
+
+void Scenery3D::set_buildings_paths(const PackedStringArray &p_paths)
+{
+	buildings_paths = p_paths;
+	if (building_manager) {
+		building_manager->set_buildings_paths(p_paths);
+	}
+}
+
+PackedStringArray Scenery3D::get_buildings_paths() const
+{
+	return buildings_paths;
 }
 
 void Scenery3D::set_water_paths(const PackedStringArray &p_paths)

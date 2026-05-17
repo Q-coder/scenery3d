@@ -5,6 +5,7 @@
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/classes/camera3d.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
+#include <godot_cpp/classes/time.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -756,6 +757,8 @@ void S3DTileManager::process_load_results(int &verts_generated)
 
 		if (!result.success) {
 			state.no_data = true;
+			UtilityFunctions::print("S3DTileManager: tile no_data (", result.ei,
+				", ", result.ni, ") desired_lod=", state.desired_lod);
 			continue;
 		}
 
@@ -870,6 +873,12 @@ void S3DTileManager::process_load_results(int &verts_generated)
 		state.current_lod = desired_lod;
 		verts_generated += tile_verts;
 
+		// Populate the elevation DB only for tiles at close LOD: this keeps
+		// the heightmap cache bounded (load_tile holds Ref<Image>), and is
+		// consistent with the fine↔coarse LOD-transition logic further
+		// down. Roads and water that load while their terrain is still at
+		// coarse LOD will retry their drape once a fine-LOD terrain tile
+		// arrives (see S3D{Road,Water}Manager::retry_pending_drapes).
 		if (desired_lod < LOD_DISCARD_THRESHOLD && elevation_db.is_valid()) {
 			elevation_db->load_tile(result.ei, result.ni, heightmap);
 		}
@@ -1141,17 +1150,64 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 	}
 
 	// 5. Sort new requests by distance (closest first) and queue to worker.
-	if (!new_requests.empty()) {
-		std::sort(new_requests.begin(), new_requests.end(),
-			[](const LoadRequest &a, const LoadRequest &b) {
-				return a.distance < b.distance;
-			});
-
+	//    Then re-prioritise the entire work_queue based on the *current*
+	//    camera position: a request queued frames ago against an older
+	//    camera position may now be far away, while new close-LOD requests
+	//    must not wait behind it. Without this, fast camera motion creates
+	//    a permanent priority inversion (the queue keeps grinding through
+	//    stale far-LOD tiles while the close ring stays empty).
+	{
 		std::lock_guard<std::mutex> lock(work_mutex);
 		for (auto &req : new_requests) {
 			work_queue.push_back(std::move(req));
 		}
-		work_cv.notify_all();
+
+		// Drop queued requests whose tile entry has been unloaded.
+		work_queue.erase(
+			std::remove_if(work_queue.begin(), work_queue.end(),
+				[this](const LoadRequest &req) {
+					return tiles.find(req.key) == tiles.end();
+				}),
+			work_queue.end());
+
+		// Recompute distance against current camera and sort closest-first.
+		for (auto &req : work_queue) {
+			int de = req.ei - cam_ei;
+			int dn = req.ni - cam_ni;
+			req.distance = std::max(std::abs(de), std::abs(dn));
+		}
+		std::sort(work_queue.begin(), work_queue.end(),
+			[](const LoadRequest &a, const LoadRequest &b) {
+				return a.distance < b.distance;
+			});
+
+		if (!new_requests.empty()) {
+			work_cv.notify_all();
+		}
+	}
+
+	// Diagnostic: once-per-second tile state summary.
+	{
+		static uint64_t last_print_ms = 0;
+		uint64_t now_ms = Time::get_singleton()->get_ticks_msec();
+		if (now_ms - last_print_ms > 1000) {
+			last_print_ms = now_ms;
+			int loading = 0, no_data = 0, ready_close = 0;
+			for (auto &kv : tiles) {
+				if (kv.second.loading) loading++;
+				if (kv.second.no_data) no_data++;
+				if (kv.second.node && !kv.second.loading
+					&& kv.second.current_lod >= 0
+					&& kv.second.current_lod < LOD_DISCARD_THRESHOLD)
+					ready_close++;
+			}
+			int elev_size = elevation_db.is_valid() ? elevation_db->get_tile_count() : -1;
+			UtilityFunctions::print("S3DTileManager: cam=(", cam_ei, ",", cam_ni,
+				") tiles=", (int)tiles.size(), " loading=", loading,
+				" no_data=", no_data, " ready<LOD", (int)LOD_DISCARD_THRESHOLD,
+				"=", ready_close, " elev_db=", elev_size,
+				" workq=", (int)work_queue.size());
+		}
 	}
 
 	// ===== FAR TERRAIN CHUNKS =====

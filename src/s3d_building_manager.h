@@ -85,21 +85,23 @@ namespace godot
 		// Tile manifest entry.
 		struct ManifestEntry {
 			std::string file;
-			std::string tile_id;
+			std::string tile_id;     // Map key (may be prefixed with dir index for uniqueness).
+			std::string raw_tile_id; // Original tile id from the manifest (for node names).
+			std::string dir;         // Buildings dir this entry was loaded from.
 			double center_e = 0;
 			double center_n = 0;
+			// Origin used by the building tile vertices (from the manifest).
+			// Tile root nodes are offset by (origin_east - origin_e,
+			// 0, origin_n - origin_north) so they end up at the right
+			// place in world coordinates regardless of the runtime origin.
+			double origin_e = 2600000.0;
+			double origin_n = 1200000.0;
 			int building_count = 0;
 		};
 
-		// Loaded manifest.
+		// Loaded manifest (merged across all configured buildings dirs).
 		std::unordered_map<std::string, ManifestEntry> manifest;
 		bool manifest_loaded = false;
-		// Origin used by the building tile vertices (read from manifest).
-		// Tile root nodes are offset by (origin_east - manifest_origin_e,
-		// 0, manifest_origin_n - origin_north) so they end up at the right
-		// place in world coordinates regardless of the runtime origin.
-		double manifest_origin_e = 2600000.0;
-		double manifest_origin_n = 1200000.0;
 
 		// Active tile states keyed by tile_id.
 		std::unordered_map<std::string, TileState> tiles;
@@ -125,8 +127,10 @@ namespace godot
 		double last_cam_e = 0;
 		double last_cam_n = 0;
 
-		// Configuration.
-		String buildings_path;
+		// Configuration. Multiple buildings dirs are merged into one manifest;
+		// each dir must contain its own manifest.json. The first dir's entry wins
+		// when tile_ids collide (a warning is emitted).
+		PackedStringArray buildings_paths;
 		double origin_east = 2600000.0;
 		double origin_north = 1200000.0;
 		int load_radius_m = 8000;    // Distance in meters to load detailed buildings.
@@ -166,6 +170,12 @@ namespace godot
 		TypedArray<String> get_hidden_buildings() const;
 
 		// Getters/Setters.
+		// Multi-path API: a PackedStringArray of buildings dirs.
+		void set_buildings_paths(const PackedStringArray &p_paths);
+		PackedStringArray get_buildings_paths() const;
+		// Compat shim: single-path API. Setter replaces the full list with one
+		// entry (or clears it if the string is empty); getter returns the first
+		// configured path (or "" if none).
 		void set_buildings_path(const String &p_path);
 		String get_buildings_path() const;
 

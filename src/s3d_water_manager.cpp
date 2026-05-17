@@ -4,6 +4,7 @@
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/classes/camera3d.hpp>
 #include <godot_cpp/classes/mesh.hpp>
+#include <godot_cpp/classes/geometry_instance3d.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include <algorithm>
@@ -526,6 +527,7 @@ void S3DWaterManager::update_tiles(Vector3 camera_pos)
 	}
 
 	process_load_results();
+	retry_pending_drapes();
 
 	if (!new_requests.empty()) {
 		std::sort(new_requests.begin(), new_requests.end(),
@@ -577,6 +579,14 @@ void S3DWaterManager::process_load_results()
 			}
 		}
 
+		state.dx = dx;
+		state.dz = dz;
+		state.baked = result.surface;
+
+		Ref<ArrayMesh> mesh;
+		mesh.instantiate();
+		state.mesh = mesh;
+
 		Array arrays;
 		arrays.resize(Mesh::ARRAY_MAX);
 		arrays[Mesh::ARRAY_VERTEX] = result.surface.vertices;
@@ -587,20 +597,140 @@ void S3DWaterManager::process_load_results()
 			arrays[Mesh::ARRAY_COLOR] = result.surface.colors;
 		}
 		arrays[Mesh::ARRAY_INDEX] = result.surface.indices;
-
-		Ref<ArrayMesh> mesh;
-		mesh.instantiate();
 		mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
 		mesh->surface_set_material(0, water_material);
 
 		MeshInstance3D *mi = memnew(MeshInstance3D);
 		mi->set_name(String("water_") + String(result.tile_id.c_str()));
 		mi->set_mesh(mesh);
-		mi->set_position(Vector3((float)dx, (float)vertical_offset_m, (float)dz));
+		// Disable shadow casting on water overlays — like roads they
+		// produce a dark stripe artefact through the terrain when the
+		// surface sits slightly below it.
+		mi->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_OFF);
+		// When draped, vertices carry absolute ASL Y; otherwise keep the
+		// legacy flat offset (for CH water GLBs that already bake Y).
+		float root_y = elevation_db.is_valid() ? 0.0f : (float)vertical_offset_m;
+		mi->set_position(Vector3((float)dx, root_y, (float)dz));
 		add_child(mi);
 
 		state.node = mi;
 		state.loaded = true;
+		state.drape_pending = elevation_db.is_valid();
+		if (state.drape_pending) {
+			mi->set_visible(false);
+		}
+		if (state.drape_pending) {
+			bool full = false;
+			if (apply_drape(state, full)) {
+				mi->set_visible(true);
+				if (full) {
+					state.drape_pending = false;
+					state.baked = SurfaceData();
+				}
+			}
+		}
+	}
+}
+
+bool S3DWaterManager::apply_drape(TileState &state, bool &out_fully_resolved)
+{
+	out_fully_resolved = false;
+	if (!elevation_db.is_valid() || state.mesh.is_null()) { out_fully_resolved = true; return true; }
+	PackedVector3Array verts = state.baked.vertices;
+	int vn = verts.size();
+	// Same graceful fallback as road manager: collect resolved heights,
+	// substitute their mean for unresolved verts so partial-coverage tiles
+	// appear as flat slabs at roughly the right altitude rather than as
+	// black wedges down to sea level.
+	double sum_h = 0.0;
+	int n_resolved = 0;
+	PackedFloat64Array sampled;
+	sampled.resize(vn);
+	for (int i = 0; i < vn; i++) {
+		Vector3 v = verts[i];
+		double world_x = (double)v.x + state.dx;
+		double world_z = (double)v.z + state.dz;
+		double h = elevation_db->get_elevation(world_x, world_z);
+		sampled[i] = h;
+		if (!std::isnan(h)) {
+			sum_h += h;
+			n_resolved++;
+		}
+	}
+	if (n_resolved == 0) {
+		state.drape_failures++;
+		if (!state.warned) {
+			state.warned = true;
+			double v0x = vn > 0 ? (double)verts[0].x + state.dx : 0;
+			double v0z = vn > 0 ? (double)verts[0].z + state.dz : 0;
+			int tx = (int)std::floor((elevation_db->get_origin_east() - v0x) / (double)elevation_db->get_tile_size());
+			int tz = (int)std::floor((v0z + elevation_db->get_origin_north()) / (double)elevation_db->get_tile_size());
+			bool has = elevation_db->has_tile(tx, tz);
+			UtilityFunctions::print("S3DWaterManager: drape pending, no DTM samples; vn=",
+				(int64_t)vn, " first world=(", v0x, ",", v0z, ") wants tile (", tx, ",", tz, ") has=", has);
+		}
+		if (state.drape_failures >= 4 && !std::isnan(last_known_terrain_y)) {
+			for (int i = 0; i < vn; i++) {
+				Vector3 v = verts[i];
+				v.y = (float)(last_known_terrain_y + vertical_offset_m);
+				verts[i] = v;
+			}
+			Array arrays;
+			arrays.resize(Mesh::ARRAY_MAX);
+			arrays[Mesh::ARRAY_VERTEX] = verts;
+			if (state.baked.normals.size() == vn) arrays[Mesh::ARRAY_NORMAL] = state.baked.normals;
+			if (state.baked.colors.size() == vn) arrays[Mesh::ARRAY_COLOR] = state.baked.colors;
+			arrays[Mesh::ARRAY_INDEX] = state.baked.indices;
+			state.mesh->clear_surfaces();
+			state.mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
+			state.mesh->surface_set_material(0, water_material);
+			out_fully_resolved = false;
+			return true;
+		}
+		return false;
+	}
+	double fallback_h = sum_h / (double)n_resolved;
+	last_known_terrain_y = fallback_h;
+	for (int i = 0; i < vn; i++) {
+		Vector3 v = verts[i];
+		double h = sampled[i];
+		if (std::isnan(h)) h = fallback_h;
+		v.y = (float)(h + vertical_offset_m);
+		verts[i] = v;
+	}
+	Array arrays;
+	arrays.resize(Mesh::ARRAY_MAX);
+	arrays[Mesh::ARRAY_VERTEX] = verts;
+	if (state.baked.normals.size() == vn) arrays[Mesh::ARRAY_NORMAL] = state.baked.normals;
+	if (state.baked.colors.size() == vn) arrays[Mesh::ARRAY_COLOR] = state.baked.colors;
+	arrays[Mesh::ARRAY_INDEX] = state.baked.indices;
+	state.mesh->clear_surfaces();
+	state.mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
+	state.mesh->surface_set_material(0, water_material);
+	out_fully_resolved = (n_resolved == vn);
+	return true;
+}
+
+void S3DWaterManager::retry_pending_drapes()
+{
+	if (!elevation_db.is_valid()) return;
+	uint64_t cur = elevation_db->get_epoch();
+	if (cur == elevation_epoch_seen) return;
+	elevation_epoch_seen = cur;
+	// Retry every pending tile in one pass — see S3DRoadManager for the
+	// rationale (epoch gate already throttles, and partial-drape tiles at
+	// the iteration head must not block the rest).
+	for (auto &kv : tiles) {
+		TileState &st = kv.second;
+		if (!st.drape_pending || !st.loaded || st.node == nullptr) continue;
+		bool full = false;
+		if (apply_drape(st, full)) {
+			st.node->set_visible(true);
+			if (full) {
+				st.drape_pending = false;
+				st.baked = SurfaceData();
+			}
+		}
 	}
 }
 

@@ -81,6 +81,7 @@ void S3DElevationDB::load_tile(int tile_x, int tile_z, Ref<Image> heightmap)
 
 	uint64_t key = _tile_key(tile_x, tile_z);
 	tiles[key] = td;
+	epoch++;
 
 	UtilityFunctions::print("S3DElevationDB: loaded tile (", tile_x, ", ", tile_z,
 		") size ", td.width, "x", td.height);
@@ -89,7 +90,7 @@ void S3DElevationDB::load_tile(int tile_x, int tile_z, Ref<Image> heightmap)
 void S3DElevationDB::unload_tile(int tile_x, int tile_z)
 {
 	uint64_t key = _tile_key(tile_x, tile_z);
-	tiles.erase(key);
+	if (tiles.erase(key)) epoch++;
 }
 
 bool S3DElevationDB::has_tile(int tile_x, int tile_z) const

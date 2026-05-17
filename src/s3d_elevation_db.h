@@ -27,6 +27,9 @@ namespace godot
 		int tile_size = 1024;
 		double origin_east = 2600000.0;
 		double origin_north = 1200000.0;
+		// Bumped on every load_tile() so consumers (road/water managers)
+		// can cheaply check "did new terrain data arrive since last frame?".
+		uint64_t epoch = 0;
 
 		static uint64_t _tile_key(int tile_x, int tile_z);
 
@@ -52,6 +55,12 @@ namespace godot
 
 		double get_elevation(double x, double z) const;
 		double get_elevation_safe(double x, double z, double default_val) const;
+
+		// Monotonically increasing counter; consumers compare against a
+		// stored value to know whether new tiles have been ingested.
+		uint64_t get_epoch() const { return epoch; }
+
+		int get_tile_count() const { return (int)tiles.size(); }
 	};
 
 }

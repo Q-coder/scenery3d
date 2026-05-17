@@ -17,9 +17,9 @@ ambient_light_color = Color(0.65, 0.7, 0.8, 1)
 load_radius = 50
 data_path = "/Users/gery/provpilot/scenery/Switzerland/terrain"
 data_paths = PackedStringArray("/Users/gery/provpilot/scenery/Switzerland/terrain", "/Users/gery/provpilot/scenery/Germany/Baden-Wuertemberg/terrain")
-buildings_path = "/Users/gery/provpilot/scenery/Switzerland/buildings"
-water_paths = PackedStringArray("/Users/gery/code/provpilot/scenery/water")
-road_paths = PackedStringArray("/Users/gery/provpilot/scenery/Switzerland/roads")
+buildings_paths = PackedStringArray("/Users/gery/provpilot/scenery/Switzerland/buildings", "/Users/gery/provpilot/scenery/Germany/Baden-Wuertemberg/buildings")
+water_paths = PackedStringArray("/Users/gery/provpilot/scenery/Switzerland/water", "/Users/gery/provpilot/scenery/Germany/Baden-Wuertemberg/water")
+road_paths = PackedStringArray("/Users/gery/provpilot/scenery/Switzerland/roads", "/Users/gery/provpilot/scenery/Germany/Baden-Wuertemberg/roads")
 orthophoto_path = "/Users/gery/provpilot/scenery/Switzerland/orthophoto"
 orthophoto_paths = PackedStringArray("/Users/gery/provpilot/scenery/Switzerland/orthophoto", "/Volumes/Data1/scenery/Germany/Baden-Wuertemberg/orthophoto")
 
