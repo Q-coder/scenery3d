@@ -7,6 +7,8 @@
 #include <godot_cpp/classes/standard_material3d.hpp>
 #include <godot_cpp/classes/ref.hpp>
 
+#include "s3d_elevation_db.h"
+
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -15,6 +17,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <limits>
 #include <string>
 
 namespace godot
@@ -39,9 +42,16 @@ namespace godot
 
 		struct TileState {
 			MeshInstance3D *node = nullptr;
+			Ref<ArrayMesh> mesh;
+			SurfaceData baked;
+			double dx = 0.0;
+			double dz = 0.0;
+			bool drape_pending = false;
 			bool loading = false;
 			bool loaded = false;
 			bool no_data = false;
+			int drape_failures = 0;
+			bool warned = false;
 		};
 
 		struct LoadRequest {
@@ -102,6 +112,16 @@ namespace godot
 		int unload_margin_m = 2000;
 		double vertical_offset_m = 1.5;
 
+		// Optional elevation DB: when set, water vertices are draped onto
+		// the terrain heightmap. Without it water sits flat at
+		// vertical_offset_m which is only useful for already-baked GLBs.
+		Ref<S3DElevationDB> elevation_db;
+		uint64_t elevation_epoch_seen = 0;
+
+		// Flat-fallback Y for tiles whose DTM hasn't loaded after several
+		// retries. NaN until first successful drape.
+		double last_known_terrain_y = std::numeric_limits<double>::quiet_NaN();
+
 		// Last known camera position in LV95.
 		double last_cam_e = 0;
 		double last_cam_n = 0;
@@ -113,6 +133,8 @@ namespace godot
 		void load_manifests();
 		void update_tiles(Vector3 camera_pos);
 		void process_load_results();
+		bool apply_drape(TileState &state, bool &out_fully_resolved);
+		void retry_pending_drapes();
 
 		static bool parse_glb(const std::vector<uint8_t> &data, SurfaceData &out);
 
@@ -145,6 +167,8 @@ namespace godot
 
 		void set_vertical_offset_m(double p_offset);
 		double get_vertical_offset_m() const;
+
+		void set_elevation_db(const Ref<S3DElevationDB> &p_db) { elevation_db = p_db; }
 
 		int get_active_tile_count() const;
 	};

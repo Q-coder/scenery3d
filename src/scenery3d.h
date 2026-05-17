@@ -31,6 +31,7 @@ namespace godot
 		String data_path;
 		PackedStringArray data_paths;
 		String buildings_path;
+		PackedStringArray buildings_paths;
 		PackedStringArray water_paths;
 		PackedStringArray road_paths;
 		String orthophoto_path;
@@ -85,6 +86,9 @@ namespace godot
 
 		void set_buildings_path(const String &p_path);
 		String get_buildings_path() const;
+
+		void set_buildings_paths(const PackedStringArray &p_paths);
+		PackedStringArray get_buildings_paths() const;
 
 		void set_water_paths(const PackedStringArray &p_paths);
 		PackedStringArray get_water_paths() const;

@@ -369,52 +369,78 @@ S3DBuildingManager::LoadResult S3DBuildingManager::parse_glb(
 
 void S3DBuildingManager::load_manifest()
 {
-	// Ensure we only attempt this once even if the manifest is missing
-	// or malformed, to avoid per-frame warning spam.
+	// Ensure we only attempt this once even if no manifest is found, to
+	// avoid per-frame warning spam.
 	manifest_loaded = true;
-
-	if (buildings_path.is_empty()) return;
-
-	String manifest_file = buildings_path + "/manifest.json";
-	std::string path = std::string(manifest_file.utf8().get_data());
-
-	std::ifstream file(path);
-	if (!file.is_open()) {
-		UtilityFunctions::push_warning("S3DBuildingManager: manifest.json not found at " + manifest_file);
-		return;
-	}
-
-	std::string content((std::istreambuf_iterator<char>(file)),
-	                     std::istreambuf_iterator<char>());
-	file.close();
-
-	const char *p = content.c_str();
-	const char *end = p + content.size();
-	JsonValue root = parse_json(p, end);
-
-	auto *tiles_obj = root.get("tiles");
-	if (!tiles_obj || tiles_obj->type != JsonValue::OBJECT) {
-		UtilityFunctions::push_warning("S3DBuildingManager: invalid manifest.json");
-		return;
-	}
-
-	manifest_origin_e = root.get_double("origin_e", 2600000.0);
-	manifest_origin_n = root.get_double("origin_n", 1200000.0);
-
 	manifest.clear();
-	for (auto &[key, val] : tiles_obj->obj_fields) {
-		ManifestEntry entry;
-		entry.tile_id = key;
-		entry.file = val.get_str("file");
-		entry.center_e = val.get_double("center_e");
-		entry.center_n = val.get_double("center_n");
-		entry.building_count = val.get_int("building_count");
-		manifest[key] = entry;
+
+	if (buildings_paths.is_empty()) return;
+
+	int loaded_dirs = 0;
+	for (int dir_idx = 0; dir_idx < buildings_paths.size(); dir_idx++) {
+		String dir = buildings_paths[dir_idx];
+		if (dir.is_empty()) continue;
+
+		String manifest_file = dir + "/manifest.json";
+		std::string path = std::string(manifest_file.utf8().get_data());
+
+		std::ifstream file(path);
+		if (!file.is_open()) {
+			UtilityFunctions::push_warning(
+				"S3DBuildingManager: manifest.json not found at " + manifest_file);
+			continue;
+		}
+
+		std::string content((std::istreambuf_iterator<char>(file)),
+		                     std::istreambuf_iterator<char>());
+		file.close();
+
+		const char *p = content.c_str();
+		const char *end = p + content.size();
+		JsonValue root = parse_json(p, end);
+
+		auto *tiles_obj = root.get("tiles");
+		if (!tiles_obj || tiles_obj->type != JsonValue::OBJECT) {
+			UtilityFunctions::push_warning(
+				"S3DBuildingManager: invalid manifest.json at " + manifest_file);
+			continue;
+		}
+
+		double origin_e = root.get_double("origin_e", 2600000.0);
+		double origin_n = root.get_double("origin_n", 1200000.0);
+		std::string dir_std(dir.utf8().get_data());
+
+		int added = 0;
+		for (auto &[key, val] : tiles_obj->obj_fields) {
+			// Prefix the map key with the dir index so identical raw tile_ids
+			// from different manifests don't collide.
+			std::string map_key = std::to_string(dir_idx) + "__" + key;
+			if (manifest.find(map_key) != manifest.end()) {
+				UtilityFunctions::push_warning(
+					String("S3DBuildingManager: duplicate tile id ") + String(key.c_str()) +
+					" in " + manifest_file + " (ignored)");
+				continue;
+			}
+			ManifestEntry entry;
+			entry.tile_id = map_key;
+			entry.raw_tile_id = key;
+			entry.dir = dir_std;
+			entry.file = val.get_str("file");
+			entry.center_e = val.get_double("center_e");
+			entry.center_n = val.get_double("center_n");
+			entry.origin_e = origin_e;
+			entry.origin_n = origin_n;
+			entry.building_count = val.get_int("building_count");
+			manifest[map_key] = entry;
+			added++;
+		}
+		loaded_dirs++;
+		UtilityFunctions::print("S3DBuildingManager: loaded ", (int64_t)added,
+		                        " building tiles from ", dir);
 	}
 
-	manifest_loaded = true;
-	UtilityFunctions::print("S3DBuildingManager: loaded manifest with ",
-	                        (int64_t)manifest.size(), " building tiles");
+	UtilityFunctions::print("S3DBuildingManager: ", (int64_t)manifest.size(),
+	                        " total tiles across ", (int64_t)loaded_dirs, " dir(s)");
 }
 
 // ── Create mesh from parsed data ────────────────────────────────────────────
@@ -529,8 +555,7 @@ void S3DBuildingManager::update_buildings(Vector3 camera_pos)
 				state.loading = true;
 				tiles[tid] = state;
 
-				std::string file_path = std::string(buildings_path.utf8().get_data())
-				                        + "/" + entry.file;
+				std::string file_path = entry.dir + "/" + entry.file;
 				LoadRequest req;
 				req.tile_id = tid;
 				req.path = file_path;
@@ -559,8 +584,7 @@ void S3DBuildingManager::update_buildings(Vector3 camera_pos)
 					state.loading = true;
 					state.lod = -1;
 
-					std::string file_path = std::string(buildings_path.utf8().get_data())
-						+ "/" + entry.file;
+					std::string file_path = entry.dir + "/" + entry.file;
 					LoadRequest req;
 					req.tile_id = tid;
 					req.path = file_path;
@@ -675,10 +699,10 @@ void S3DBuildingManager::process_load_results()
 		// Create container node for individual buildings (only if near).
 		if (create_detail) {
 			Node3D *root = memnew(Node3D);
-			root->set_name(String("buildings_") + String(result.tile_id.c_str()));
+			root->set_name(String("buildings_") + String(mit->second.raw_tile_id.c_str()));
 			add_child(root);
-			double dx = origin_east - manifest_origin_e;
-			double dz = manifest_origin_n - origin_north;
+			double dx = origin_east - mit->second.origin_e;
+			double dz = mit->second.origin_n - origin_north;
 			root->set_position(Vector3((float)dx, 0.0f, (float)dz));
 			state.root_node = root;
 
@@ -748,12 +772,12 @@ void S3DBuildingManager::process_load_results()
 					wall_material, roof_material);
 				if (far_mesh.is_valid()) {
 					MeshInstance3D *far_mi = memnew(MeshInstance3D);
-					far_mi->set_name(String("_far_lod_") + String(result.tile_id.c_str()));
+					far_mi->set_name(String("_far_lod_") + String(mit->second.raw_tile_id.c_str()));
 					far_mi->set_mesh(far_mesh);
 					far_mi->set_visible(false);
 					add_child(far_mi);
-					double dx = origin_east - manifest_origin_e;
-					double dz = manifest_origin_n - origin_north;
+					double dx = origin_east - mit->second.origin_e;
+					double dz = mit->second.origin_n - origin_north;
 					far_mi->set_position(Vector3((float)dx, 0.0f, (float)dz));
 					state.far_lod_node = far_mi;
 				}
@@ -826,6 +850,10 @@ void S3DBuildingManager::_bind_methods()
 	ClassDB::bind_method(D_METHOD("get_active_tile_count"), &S3DBuildingManager::get_active_tile_count);
 	ClassDB::bind_method(D_METHOD("get_building_count"), &S3DBuildingManager::get_building_count);
 
+	ClassDB::bind_method(D_METHOD("set_buildings_paths", "paths"), &S3DBuildingManager::set_buildings_paths);
+	ClassDB::bind_method(D_METHOD("get_buildings_paths"), &S3DBuildingManager::get_buildings_paths);
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_STRING_ARRAY, "buildings_paths"), "set_buildings_paths", "get_buildings_paths");
+
 	ClassDB::bind_method(D_METHOD("set_buildings_path", "path"), &S3DBuildingManager::set_buildings_path);
 	ClassDB::bind_method(D_METHOD("get_buildings_path"), &S3DBuildingManager::get_buildings_path);
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "buildings_path"), "set_buildings_path", "get_buildings_path");
@@ -871,15 +899,29 @@ int S3DBuildingManager::get_building_count() const
 	return count;
 }
 
+void S3DBuildingManager::set_buildings_paths(const PackedStringArray &p_paths)
+{
+	buildings_paths = p_paths;
+	manifest_loaded = false;
+}
+
+PackedStringArray S3DBuildingManager::get_buildings_paths() const
+{
+	return buildings_paths;
+}
+
 void S3DBuildingManager::set_buildings_path(const String &p_path)
 {
-	buildings_path = p_path;
+	buildings_paths.clear();
+	if (!p_path.is_empty()) {
+		buildings_paths.push_back(p_path);
+	}
 	manifest_loaded = false;
 }
 
 String S3DBuildingManager::get_buildings_path() const
 {
-	return buildings_path;
+	return buildings_paths.is_empty() ? String() : buildings_paths[0];
 }
 
 void S3DBuildingManager::set_origin_east(double p_east) { origin_east = p_east; }

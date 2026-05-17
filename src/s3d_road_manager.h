@@ -18,6 +18,7 @@
 #include <condition_variable>
 #include <atomic>
 #include <string>
+#include <limits>
 
 namespace godot
 {
@@ -41,9 +42,16 @@ namespace godot
 
 		struct TileState {
 			MeshInstance3D *node = nullptr;
+			Ref<ArrayMesh> mesh;
+			SurfaceData baked;     // pristine vertices for re-drape
+			double dx = 0.0;       // cached LV95 origin offset
+			double dz = 0.0;
+			bool drape_pending = false;
 			bool loading = false;
 			bool loaded = false;
 			bool no_data = false;
+			int drape_failures = 0;
+			bool warned = false;
 		};
 
 		struct LoadRequest {
@@ -107,6 +115,15 @@ namespace godot
 		// between the baked road elevation and the rendered terrain.
 		Ref<S3DElevationDB> elevation_db;
 
+		// Last seen elevation_db epoch; retry only fires when the DB has
+		// new tiles to offer (avoids per-frame mesh rebuilds).
+		uint64_t elevation_epoch_seen = 0;
+
+		// Running mean of recently resolved DTM samples — used as a flat
+		// fallback Y so road tiles in uncovered regions are still visible
+		// (instead of staying invisible forever). NaN until first success.
+		double last_known_terrain_y = std::numeric_limits<double>::quiet_NaN();
+
 		// Last known camera position in LV95.
 		double last_cam_e = 0;
 		double last_cam_n = 0;
@@ -118,6 +135,10 @@ namespace godot
 		void load_manifests();
 		void update_tiles(Vector3 camera_pos);
 		void process_load_results();
+		// Drape baked vertices onto current elevation_db. Returns true if
+		// every vertex hit valid terrain (so the tile no longer needs retry).
+		bool apply_drape(TileState &state, bool &out_fully_resolved);
+		void retry_pending_drapes();
 
 		static bool parse_glb(const std::vector<uint8_t> &data, SurfaceData &out);
 

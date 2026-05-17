@@ -4,6 +4,7 @@
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/classes/camera3d.hpp>
 #include <godot_cpp/classes/mesh.hpp>
+#include <godot_cpp/classes/geometry_instance3d.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include <algorithm>
@@ -518,6 +519,7 @@ void S3DRoadManager::update_tiles(Vector3 camera_pos)
 	}
 
 	process_load_results();
+	retry_pending_drapes();
 
 	if (!new_requests.empty()) {
 		std::sort(new_requests.begin(), new_requests.end(),
@@ -569,27 +571,19 @@ void S3DRoadManager::process_load_results()
 			}
 		}
 
-		// Drape the road onto the terrain. The road GLBs carry their own
-		// baked Y from whatever DTM was used at generation time, which can
-		// differ from the heightmap the terrain mesh is built from and
-		// produces visible gaps/clipping. Re-sample elevation at each
-		// vertex's world XZ so the road always sits flush on the current
-		// terrain. The small vertical_offset_m keeps roads just above
-		// terrain to avoid z-fighting.
-		if (elevation_db.is_valid()) {
-			PackedVector3Array &verts = result.surface.vertices;
-			int vn = verts.size();
-			for (int i = 0; i < vn; i++) {
-				Vector3 v = verts[i];
-				double world_x = (double)v.x + dx;
-				double world_z = (double)v.z + dz;
-				double h = elevation_db->get_elevation(world_x, world_z);
-				if (std::isnan(h)) h = (double)v.y; // keep original if no terrain
-				v.y = (float)(h + vertical_offset_m);
-				verts[i] = v;
-			}
-		}
+		// Store the pristine surface and offsets so we can re-drape later
+		// if elevation_db wasn't yet populated for the relevant terrain
+		// tile when this road tile finished loading.
+		state.dx = dx;
+		state.dz = dz;
+		state.baked = result.surface;
 
+		Ref<ArrayMesh> mesh;
+		mesh.instantiate();
+		state.mesh = mesh;
+
+		// Initial surface uses baked vertices as-is; apply_drape() below
+		// rebuilds with terrain-conformed Y when elevation_db is set.
 		Array arrays;
 		arrays.resize(Mesh::ARRAY_MAX);
 		arrays[Mesh::ARRAY_VERTEX] = result.surface.vertices;
@@ -600,15 +594,19 @@ void S3DRoadManager::process_load_results()
 			arrays[Mesh::ARRAY_COLOR] = result.surface.colors;
 		}
 		arrays[Mesh::ARRAY_INDEX] = result.surface.indices;
-
-		Ref<ArrayMesh> mesh;
-		mesh.instantiate();
 		mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
 		mesh->surface_set_material(0, road_material);
 
 		MeshInstance3D *mi = memnew(MeshInstance3D);
 		mi->set_name(String("road_") + String(result.tile_id.c_str()));
 		mi->set_mesh(mesh);
+		// Disable shadow casting: with roads draped onto the terrain the
+		// cast shadow shows up as a dark stripe on the surface that does
+		// not match the terrain shading. Roads still receive shadows from
+		// trees etc. via FLAG_DONT_RECEIVE_SHADOWS being unset on the
+		// material — actually it IS set above, so they neither cast nor
+		// receive, which is what we want for thin overlay geometry.
+		mi->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_OFF);
 		// When vertices are draped, they already carry absolute ASL Y, so the
 		// root node sits at y=0. Without elevation_db, keep the legacy fixed
 		// offset for backward compatibility.
@@ -618,6 +616,147 @@ void S3DRoadManager::process_load_results()
 
 		state.node = mi;
 		state.loaded = true;
+		state.drape_pending = elevation_db.is_valid();
+
+		// Hide while drape is incomplete: leaving a partially-draped tile
+		// visible drops un-resolved vertices to their baked Y (0 for the BW
+		// OSM GLBs) which paints a huge black triangle from terrain altitude
+		// down to sea level. The tile becomes visible once all vertices land
+		// on real terrain.
+		if (state.drape_pending) {
+			mi->set_visible(false);
+		}
+
+		// First drape attempt. The mesh becomes presentable as soon as ANY
+		// vertex resolves against the elevation DB — unresolved ones use the
+		// mean of resolved heights. Tiles where nothing resolved stay hidden
+		// and pending so we can retry when LGL tiles arrive.
+		if (state.drape_pending) {
+			bool full = false;
+			if (apply_drape(state, full)) {
+				mi->set_visible(true);
+				if (full) {
+					state.drape_pending = false;
+					state.baked = SurfaceData(); // free memory
+				}
+			}
+		}
+	}
+}
+
+bool S3DRoadManager::apply_drape(TileState &state, bool &out_fully_resolved)
+{
+	out_fully_resolved = false;
+	if (!elevation_db.is_valid() || state.mesh.is_null()) { out_fully_resolved = true; return true; }
+	PackedVector3Array verts = state.baked.vertices;
+	int vn = verts.size();
+	// First pass: collect successfully-sampled heights so we can fall back
+	// to their mean for vertices outside the currently-loaded DTM tiles.
+	// Without this fallback the unresolved vertices kept their baked Y
+	// (which is 0 in BW OSM data) and produced huge black wedges from
+	// terrain altitude down to sea level.
+	double sum_h = 0.0;
+	int n_resolved = 0;
+	PackedFloat64Array sampled;
+	sampled.resize(vn);
+	for (int i = 0; i < vn; i++) {
+		Vector3 v = verts[i];
+		double world_x = (double)v.x + state.dx;
+		double world_z = (double)v.z + state.dz;
+		double h = elevation_db->get_elevation(world_x, world_z);
+		sampled[i] = h;
+		if (!std::isnan(h)) {
+			sum_h += h;
+			n_resolved++;
+		}
+	}
+	if (n_resolved == 0) {
+		// Nothing in the elevation DB yet for this tile.
+		state.drape_failures++;
+		if (!state.warned) {
+			state.warned = true;
+			double v0x = vn > 0 ? (double)verts[0].x + state.dx : 0;
+			double v0z = vn > 0 ? (double)verts[0].z + state.dz : 0;
+			int tx = (int)std::floor((elevation_db->get_origin_east() - v0x) / (double)elevation_db->get_tile_size());
+			int tz = (int)std::floor((v0z + elevation_db->get_origin_north()) / (double)elevation_db->get_tile_size());
+			bool has = elevation_db->has_tile(tx, tz);
+			UtilityFunctions::print("S3DRoadManager: drape pending, no DTM samples; vn=",
+				(int64_t)vn, " first world=(", v0x, ",", v0z, ") wants tile (", tx, ",", tz, ") has=", has);
+		}
+		// Fallback: after several failed retries, show the tile flat at the
+		// last-known terrain Y so it's at least visible. The tile stays
+		// pending so future DTM arrivals can refine it.
+		if (state.drape_failures >= 4 && !std::isnan(last_known_terrain_y)) {
+			for (int i = 0; i < vn; i++) {
+				Vector3 v = verts[i];
+				v.y = (float)(last_known_terrain_y + vertical_offset_m);
+				verts[i] = v;
+			}
+			Array arrays;
+			arrays.resize(Mesh::ARRAY_MAX);
+			arrays[Mesh::ARRAY_VERTEX] = verts;
+			if (state.baked.normals.size() == vn) arrays[Mesh::ARRAY_NORMAL] = state.baked.normals;
+			if (state.baked.colors.size() == vn) arrays[Mesh::ARRAY_COLOR] = state.baked.colors;
+			arrays[Mesh::ARRAY_INDEX] = state.baked.indices;
+			state.mesh->clear_surfaces();
+			state.mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
+			state.mesh->surface_set_material(0, road_material);
+			out_fully_resolved = false;
+			return true;
+		}
+		return false;
+	}
+	double fallback_h = sum_h / (double)n_resolved;
+	last_known_terrain_y = fallback_h;
+	for (int i = 0; i < vn; i++) {
+		Vector3 v = verts[i];
+		double h = sampled[i];
+		if (std::isnan(h)) h = fallback_h;
+		v.y = (float)(h + vertical_offset_m);
+		verts[i] = v;
+	}
+	Array arrays;
+	arrays.resize(Mesh::ARRAY_MAX);
+	arrays[Mesh::ARRAY_VERTEX] = verts;
+	if (state.baked.normals.size() == vn) arrays[Mesh::ARRAY_NORMAL] = state.baked.normals;
+	if (state.baked.colors.size() == vn) arrays[Mesh::ARRAY_COLOR] = state.baked.colors;
+	arrays[Mesh::ARRAY_INDEX] = state.baked.indices;
+	state.mesh->clear_surfaces();
+	state.mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
+	state.mesh->surface_set_material(0, road_material);
+	// Report whether the drape was fully resolved — partial drapes will be
+	// retried when new elevation tiles arrive so the fallback mean is
+	// eventually replaced by real DTM samples.
+	out_fully_resolved = (n_resolved == vn);
+	return true; // presentable: at least one vertex resolved
+}
+
+void S3DRoadManager::retry_pending_drapes()
+{
+	if (!elevation_db.is_valid()) return;
+	// Skip entirely when no new terrain has been loaded since last retry —
+	// re-running apply_drape (which rebuilds the GPU mesh) every frame for
+	// stuck-pending tiles was the main perf regression.
+	uint64_t cur = elevation_db->get_epoch();
+	if (cur == elevation_epoch_seen) return;
+	elevation_epoch_seen = cur;
+	// Retry every pending tile in one pass. The epoch gate above ensures
+	// this only runs when the DB has actually gained new tiles, so the
+	// GPU re-upload spike happens at most once per ingest burst (not per
+	// frame) — far more responsive than the previous 1-tile-per-frame
+	// throttle, which left tiles draped at stale fallback Y for many
+	// seconds whenever a partial-resolve tile sat at the iteration head.
+	for (auto &kv : tiles) {
+		TileState &st = kv.second;
+		if (!st.drape_pending || !st.loaded || st.node == nullptr) continue;
+		bool full = false;
+		if (apply_drape(st, full)) {
+			st.node->set_visible(true);
+			if (full) {
+				st.drape_pending = false;
+				st.baked = SurfaceData();
+			}
+		}
 	}
 }
 
