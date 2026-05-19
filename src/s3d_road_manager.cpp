@@ -14,6 +14,8 @@
 
 using namespace godot;
 
+namespace s3d {
+
 // ── Constructor / Destructor ────────────────────────────────────────────────
 
 S3DRoadManager::S3DRoadManager()
@@ -838,3 +840,5 @@ void S3DRoadManager::set_vertical_offset_m(double p_offset)
 	}
 }
 double S3DRoadManager::get_vertical_offset_m() const { return vertical_offset_m; }
+
+} // namespace s3d

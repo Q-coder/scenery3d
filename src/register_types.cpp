@@ -14,24 +14,24 @@
 
 using namespace godot;
 
-void initialize_scenery3d_module(ModuleInitializationLevel p_level)
+void initialize_scenery3d_module(godot::ModuleInitializationLevel p_level)
 {
 	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE)
 	{
 		return;
 	}
-	ClassDB::register_class<Scenery3D>();
-	ClassDB::register_class<S3DTileManager>();
-	ClassDB::register_class<S3DTile>();
-	ClassDB::register_class<S3DElevationDB>();
-	ClassDB::register_class<S3DCoords>();
-	ClassDB::register_class<S3DBuildingManager>();
-	ClassDB::register_class<S3DWaterManager>();
-	ClassDB::register_class<S3DRoadManager>();
-	ClassDB::register_class<S3DVegetationManager>();
+	ClassDB::register_class<s3d::Scenery3D>();
+	ClassDB::register_class<s3d::S3DTileManager>();
+	ClassDB::register_class<s3d::S3DTile>();
+	ClassDB::register_class<s3d::S3DElevationDB>();
+	ClassDB::register_class<s3d::S3DCoords>();
+	ClassDB::register_class<s3d::S3DBuildingManager>();
+	ClassDB::register_class<s3d::S3DWaterManager>();
+	ClassDB::register_class<s3d::S3DRoadManager>();
+	ClassDB::register_class<s3d::S3DVegetationManager>();
 }
 
-void uninitialize_scenery3d_module(ModuleInitializationLevel p_level)
+void uninitialize_scenery3d_module(godot::ModuleInitializationLevel p_level)
 {
 	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE)
 	{

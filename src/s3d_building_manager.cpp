@@ -16,6 +16,8 @@
 
 using namespace godot;
 
+namespace s3d {
+
 // ── Constructor / Destructor ────────────────────────────────────────────────
 
 S3DBuildingManager::S3DBuildingManager()
@@ -938,3 +940,5 @@ int S3DBuildingManager::get_far_radius_m() const { return far_radius_m; }
 
 void S3DBuildingManager::set_detail_radius_m(int p_radius) { detail_radius_m = p_radius; }
 int S3DBuildingManager::get_detail_radius_m() const { return detail_radius_m; }
+
+} // namespace s3d

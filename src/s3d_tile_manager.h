@@ -19,7 +19,7 @@
 
 #include "s3d_elevation_db.h"
 
-namespace godot
+namespace s3d
 {
 
 	class S3DTile;
@@ -27,9 +27,9 @@ namespace godot
 	// Manages the lifecycle of terrain tiles with distance-based LOD and
 	// background file I/O. Tiles are organized in LOD rings: closer tiles
 	// get higher detail, distant tiles get progressively coarser meshes.
-	class S3DTileManager : public Node3D
+	class S3DTileManager : public godot::Node3D
 	{
-		GDCLASS(S3DTileManager, Node3D);
+		GDCLASS(S3DTileManager, godot::Node3D);
 
 	private:
 		// LOD ring: tiles within this Chebyshev distance get this LOD level.
@@ -126,13 +126,13 @@ namespace godot
 		std::atomic<bool> worker_running{false};
 
 		// Shared material for tiles without orthophoto.
-		Ref<StandardMaterial3D> shared_material;
+		godot::Ref<godot::StandardMaterial3D> shared_material;
 
 		// Ordered list of orthophoto root directories (each contains
 		// ortho_E_N.jpg + mip subdirs). Worker tries each in order; the
 		// first existing file wins. Lets CH SWISSIMAGE and DE LGL DOP20
 		// coexist seamlessly across the border.
-		PackedStringArray orthophoto_paths;
+		godot::PackedStringArray orthophoto_paths;
 
 		// When true and 2+ orthophoto paths are configured, the worker
 		// decodes every candidate JPEG and composites them: pure white
@@ -155,7 +155,7 @@ namespace godot
 		int unload_margin = 2;
 		// Ordered list of directories to search for tile files.
 		// The first entry is returned by get_data_path() for backward compat.
-		PackedStringArray data_paths;
+		godot::PackedStringArray data_paths;
 
 		double origin_east = 2600000.0;
 		double origin_north = 1200000.0;
@@ -187,7 +187,7 @@ namespace godot
 		// sampling vs 1 m tile sampling on typical terrain.
 		static constexpr double CHUNK_Y_BIAS = -30.0;
 
-		Ref<S3DElevationDB> elevation_db;
+		godot::Ref<S3DElevationDB> elevation_db;
 
 		static inline uint64_t tile_key(int tx, int tz) {
 			return ((uint64_t)(uint32_t)tx << 32) | (uint32_t)tz;
@@ -212,7 +212,7 @@ namespace godot
 
 		void _process(double delta) override;
 
-		void update_tiles(Vector3 camera_pos);
+		void update_tiles(godot::Vector3 camera_pos);
 		int get_active_tile_count() const;
 
 		void set_tile_size(int p_size);
@@ -230,11 +230,11 @@ namespace godot
 		void set_unload_margin(int p_margin);
 		int get_unload_margin() const;
 
-		void set_data_path(const String &p_path);
-		String get_data_path() const;
+		void set_data_path(const godot::String &p_path);
+		godot::String get_data_path() const;
 
-		void set_data_paths(const PackedStringArray &p_paths);
-		PackedStringArray get_data_paths() const;
+		void set_data_paths(const godot::PackedStringArray &p_paths);
+		godot::PackedStringArray get_data_paths() const;
 
 		void set_origin_east(double p_east);
 		double get_origin_east() const;
@@ -243,17 +243,17 @@ namespace godot
 		double get_origin_north() const;
 
 		// Backward-compat single-path setters: route through orthophoto_paths.
-		void set_orthophoto_path(const String &p_path);
-		String get_orthophoto_path() const;
+		void set_orthophoto_path(const godot::String &p_path);
+		godot::String get_orthophoto_path() const;
 
-		void set_orthophoto_paths(const PackedStringArray &p_paths);
-		PackedStringArray get_orthophoto_paths() const;
+		void set_orthophoto_paths(const godot::PackedStringArray &p_paths);
+		godot::PackedStringArray get_orthophoto_paths() const;
 
 		void set_skip_white_pixels(bool p_skip);
 		bool get_skip_white_pixels() const;
 
-		void set_elevation_db(Ref<S3DElevationDB> p_db);
-		Ref<S3DElevationDB> get_elevation_db() const;
+		void set_elevation_db(godot::Ref<S3DElevationDB> p_db);
+		godot::Ref<S3DElevationDB> get_elevation_db() const;
 	};
 
 }

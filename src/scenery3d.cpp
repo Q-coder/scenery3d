@@ -10,6 +10,8 @@
 
 using namespace godot;
 
+namespace s3d {
+
 Scenery3D::Scenery3D()
 {
 }
@@ -467,3 +469,5 @@ double Scenery3D::get_origin_north() const
 {
 	return origin_north;
 }
+
+} // namespace s3d

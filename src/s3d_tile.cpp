@@ -6,6 +6,8 @@
 
 using namespace godot;
 
+namespace s3d {
+
 S3DTile::S3DTile()
 {
 }
@@ -253,3 +255,5 @@ int S3DTile::get_tile_size() const
 {
 	return tile_size;
 }
+
+} // namespace s3d

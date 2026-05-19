@@ -14,6 +14,8 @@
 
 using namespace godot;
 
+namespace s3d {
+
 // ── Constructor / Destructor ────────────────────────────────────────────────
 
 S3DWaterManager::S3DWaterManager()
@@ -819,3 +821,5 @@ void S3DWaterManager::set_vertical_offset_m(double p_offset)
 	}
 }
 double S3DWaterManager::get_vertical_offset_m() const { return vertical_offset_m; }
+
+} // namespace s3d

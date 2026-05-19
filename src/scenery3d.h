@@ -7,7 +7,7 @@
 #include "s3d_elevation_db.h"
 #include "s3d_coords.h"
 
-namespace godot
+namespace s3d
 {
 
 	class S3DTileManager;
@@ -18,9 +18,9 @@ namespace godot
 	// Main entry point for the terrain system.
 	// Owns the tile manager and elevation database, and coordinates
 	// tile loading around the camera position.
-	class Scenery3D : public Node3D
+	class Scenery3D : public godot::Node3D
 	{
-		GDCLASS(Scenery3D, Node3D);
+		GDCLASS(Scenery3D, godot::Node3D);
 
 	private:
 		int tile_size = 1024;
@@ -28,22 +28,22 @@ namespace godot
 		int far_radius = 200;
 		double origin_east = 2600000.0;
 		double origin_north = 1200000.0;
-		String data_path;
-		PackedStringArray data_paths;
-		String buildings_path;
-		PackedStringArray buildings_paths;
-		PackedStringArray water_paths;
-		PackedStringArray road_paths;
-		String orthophoto_path;
-		PackedStringArray orthophoto_paths;
+		godot::String data_path;
+		godot::PackedStringArray data_paths;
+		godot::String buildings_path;
+		godot::PackedStringArray buildings_paths;
+		godot::PackedStringArray water_paths;
+		godot::PackedStringArray road_paths;
+		godot::String orthophoto_path;
+		godot::PackedStringArray orthophoto_paths;
 		bool skip_white_pixels = true;
 
 		S3DTileManager *tile_manager = nullptr;
 		S3DBuildingManager *building_manager = nullptr;
 		S3DWaterManager *water_manager = nullptr;
 		S3DRoadManager *road_manager = nullptr;
-		Ref<S3DElevationDB> elevation_db;
-		Ref<S3DCoords> coords;
+		godot::Ref<S3DElevationDB> elevation_db;
+		godot::Ref<S3DCoords> coords;
 
 	protected:
 		static void _bind_methods();
@@ -59,9 +59,9 @@ namespace godot
 		double get_elevation(double x, double z) const;
 
 		// Access the elevation database directly (e.g. for JSBSim integration).
-		Ref<S3DElevationDB> get_elevation_db() const;
+		godot::Ref<S3DElevationDB> get_elevation_db() const;
 
-		Ref<S3DCoords> get_coords() const;
+		godot::Ref<S3DCoords> get_coords() const;
 
 		void set_tile_size(int p_size);
 		int get_tile_size() const;
@@ -78,37 +78,37 @@ namespace godot
 		void set_origin_north(double p_north);
 		double get_origin_north() const;
 
-		void set_data_path(const String &p_path);
-		String get_data_path() const;
+		void set_data_path(const godot::String &p_path);
+		godot::String get_data_path() const;
 
-		void set_data_paths(const PackedStringArray &p_paths);
-		PackedStringArray get_data_paths() const;
+		void set_data_paths(const godot::PackedStringArray &p_paths);
+		godot::PackedStringArray get_data_paths() const;
 
-		void set_buildings_path(const String &p_path);
-		String get_buildings_path() const;
+		void set_buildings_path(const godot::String &p_path);
+		godot::String get_buildings_path() const;
 
-		void set_buildings_paths(const PackedStringArray &p_paths);
-		PackedStringArray get_buildings_paths() const;
+		void set_buildings_paths(const godot::PackedStringArray &p_paths);
+		godot::PackedStringArray get_buildings_paths() const;
 
-		void set_water_paths(const PackedStringArray &p_paths);
-		PackedStringArray get_water_paths() const;
+		void set_water_paths(const godot::PackedStringArray &p_paths);
+		godot::PackedStringArray get_water_paths() const;
 
-		void set_road_paths(const PackedStringArray &p_paths);
-		PackedStringArray get_road_paths() const;
+		void set_road_paths(const godot::PackedStringArray &p_paths);
+		godot::PackedStringArray get_road_paths() const;
 
-		void set_orthophoto_path(const String &p_path);
-		String get_orthophoto_path() const;
+		void set_orthophoto_path(const godot::String &p_path);
+		godot::String get_orthophoto_path() const;
 
-		void set_orthophoto_paths(const PackedStringArray &p_paths);
-		PackedStringArray get_orthophoto_paths() const;
+		void set_orthophoto_paths(const godot::PackedStringArray &p_paths);
+		godot::PackedStringArray get_orthophoto_paths() const;
 
 		void set_skip_white_pixels(bool p_skip);
 		bool get_skip_white_pixels() const;
 
 		// Building visibility control.
-		void hide_building(const String &uuid);
-		void show_building(const String &uuid);
-		bool is_building_hidden(const String &uuid) const;
+		void hide_building(const godot::String &uuid);
+		void show_building(const godot::String &uuid);
+		bool is_building_hidden(const godot::String &uuid) const;
 	};
 
 }

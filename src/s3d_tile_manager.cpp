@@ -14,6 +14,8 @@
 
 using namespace godot;
 
+namespace s3d {
+
 // --- Orthophoto mip path helper ---
 
 int S3DTileManager::ortho_mip_for_lod(int lod)
@@ -1498,7 +1500,9 @@ void S3DTileManager::set_elevation_db(Ref<S3DElevationDB> p_db)
 	elevation_db = p_db;
 }
 
-Ref<S3DElevationDB> S3DTileManager::get_elevation_db() const
+godot::Ref<S3DElevationDB> S3DTileManager::get_elevation_db() const
 {
 	return elevation_db;
 }
+
+} // namespace s3d

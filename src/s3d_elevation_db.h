@@ -5,25 +5,25 @@
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/templates/hash_map.hpp>
 
-namespace godot
+namespace s3d
 {
 
 	// Provides O(1) elevation queries via bilinear interpolation over loaded
 	// heightmap tiles. Used by the flight dynamics model to get ground elevation
 	// at arbitrary world coordinates without any search overhead.
-	class S3DElevationDB : public RefCounted
+	class S3DElevationDB : public godot::RefCounted
 	{
-		GDCLASS(S3DElevationDB, RefCounted);
+		GDCLASS(S3DElevationDB, godot::RefCounted);
 
 	public:
 		struct TileData {
-			Ref<Image> heightmap;
+			godot::Ref<godot::Image> heightmap;
 			int width;
 			int height;
 		};
 
 	private:
-		HashMap<uint64_t, TileData> tiles;
+		godot::HashMap<uint64_t, TileData> tiles;
 		int tile_size = 1024;
 		double origin_east = 2600000.0;
 		double origin_north = 1200000.0;
@@ -49,7 +49,7 @@ namespace godot
 		void set_origin_north(double p_north);
 		double get_origin_north() const;
 
-		void load_tile(int tile_x, int tile_z, Ref<Image> heightmap);
+		void load_tile(int tile_x, int tile_z, godot::Ref<godot::Image> heightmap);
 		void unload_tile(int tile_x, int tile_z);
 		bool has_tile(int tile_x, int tile_z) const;
 
