@@ -10,16 +10,16 @@
 #include <godot_cpp/variant/packed_vector2_array.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 
-namespace godot
+namespace s3d
 {
 
 	// Represents a single terrain tile as a mesh generated from heightmap data.
 	// The heightmap image should be FORMAT_RF (32-bit float per pixel) with
 	// values representing elevation in meters. The mesh spans [0, tile_size]
 	// in X and Z, with Y taken directly from pixel values.
-	class S3DTile : public MeshInstance3D
+	class S3DTile : public godot::MeshInstance3D
 	{
-		GDCLASS(S3DTile, MeshInstance3D);
+		GDCLASS(S3DTile, godot::MeshInstance3D);
 
 	private:
 		int tile_x = 0;
@@ -28,11 +28,11 @@ namespace godot
 		int lod_level = 4;
 		bool mesh_ready = false;
 
-		Ref<Image> heightmap;
-		Ref<StandardMaterial3D> material;
+		godot::Ref<godot::Image> heightmap;
+		godot::Ref<godot::StandardMaterial3D> material;
 
 		// Sample height at pixel coordinates, clamped to image bounds.
-		real_t sample_height(int px, int py, int img_w, int img_h) const;
+		godot::real_t sample_height(int px, int py, int img_w, int img_h) const;
 
 	protected:
 		static void _bind_methods();
@@ -45,12 +45,12 @@ namespace godot
 		void generate_mesh();
 
 		// Store the heightmap image (does NOT auto-generate mesh).
-		void set_heightmap(Ref<Image> p_heightmap);
-		Ref<Image> get_heightmap() const;
+		void set_heightmap(godot::Ref<godot::Image> p_heightmap);
+		godot::Ref<godot::Image> get_heightmap() const;
 
 		// Set shared material (used by generate_mesh if set).
-		void set_material(Ref<StandardMaterial3D> p_mat);
-		Ref<StandardMaterial3D> get_material() const;
+		void set_material(godot::Ref<godot::StandardMaterial3D> p_mat);
+		godot::Ref<godot::StandardMaterial3D> get_material() const;
 
 		// Returns true once the mesh has been generated.
 		bool is_mesh_ready() const;

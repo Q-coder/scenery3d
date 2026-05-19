@@ -17,6 +17,8 @@
 
 using namespace godot;
 
+namespace s3d {
+
 // File format constants (must match tools/extract_tlm_forests.py).
 static constexpr uint32_t VEG_MAGIC = 0x31474556; // 'V','E','G','1' little-endian
 static constexpr uint32_t VEG_VERSION = 1;
@@ -486,3 +488,5 @@ void S3DVegetationManager::set_density_fraction(double v) {
 double S3DVegetationManager::get_density_fraction() const { return density_fraction; }
 
 int S3DVegetationManager::get_active_tile_count() const { return (int)tiles.size(); }
+
+} // namespace s3d

@@ -4,7 +4,7 @@
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/variant/vector3.hpp>
 
-namespace godot
+namespace s3d
 {
 
 	// Converts between WGS84 (latitude/longitude), Swiss LV95/CH1903+ (EPSG:2056),
@@ -15,9 +15,9 @@ namespace godot
 	//   X = LV95 East  - origin_east   (positive = east)
 	//   Y = elevation
 	//   Z = LV95 North - origin_north  (positive = north)
-	class S3DCoords : public RefCounted
+	class S3DCoords : public godot::RefCounted
 	{
-		GDCLASS(S3DCoords, RefCounted);
+		GDCLASS(S3DCoords, godot::RefCounted);
 
 	private:
 		// LV95 origin that maps to Godot world (0, 0, 0).
@@ -41,16 +41,16 @@ namespace godot
 		void set_origin_from_wgs84(double latitude, double longitude);
 
 		// --- LV95 <-> Godot world ---
-		Vector3 lv95_to_world(double east, double north, double elevation) const;
-		Vector3 world_to_lv95(Vector3 world_pos) const;
+		godot::Vector3 lv95_to_world(double east, double north, double elevation) const;
+		godot::Vector3 world_to_lv95(godot::Vector3 world_pos) const;
 
 		// --- WGS84 <-> LV95 (static, no origin needed) ---
-		static Vector3 wgs84_to_lv95(double latitude, double longitude);
-		static Vector3 lv95_to_wgs84(double east, double north);
+		static godot::Vector3 wgs84_to_lv95(double latitude, double longitude);
+		static godot::Vector3 lv95_to_wgs84(double east, double north);
 
 		// --- WGS84 <-> Godot world (convenience) ---
-		Vector3 wgs84_to_world(double latitude, double longitude, double elevation) const;
-		Vector3 world_to_wgs84(Vector3 world_pos) const;
+		godot::Vector3 wgs84_to_world(double latitude, double longitude, double elevation) const;
+		godot::Vector3 world_to_wgs84(godot::Vector3 world_pos) const;
 	};
 
 }

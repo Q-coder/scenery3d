@@ -5,6 +5,8 @@
 
 using namespace godot;
 
+namespace s3d {
+
 S3DElevationDB::S3DElevationDB()
 {
 }
@@ -179,3 +181,5 @@ double S3DElevationDB::get_elevation_safe(double x, double z, double default_val
 
 	return get_elevation(x, z);
 }
+
+} // namespace s3d

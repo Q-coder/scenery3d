@@ -20,29 +20,29 @@
 #include <string>
 #include <limits>
 
-namespace godot
+namespace s3d
 {
 
 	// Manages road tiles (roads and railways): loads GLB files with per-vertex
 	// colour in the background and parents them to the scene. Much simpler
 	// than the building manager — a single LOD, no per-object controls, and
 	// vertex colours are preserved via a shared StandardMaterial3D.
-	class S3DRoadManager : public Node3D
+	class S3DRoadManager : public godot::Node3D
 	{
-		GDCLASS(S3DRoadManager, Node3D);
+		GDCLASS(S3DRoadManager, godot::Node3D);
 
 	private:
 		// Parsed road surface (one per tile).
 		struct SurfaceData {
-			PackedVector3Array vertices;
-			PackedVector3Array normals;
-			PackedColorArray colors;
-			PackedInt32Array indices;
+			godot::PackedVector3Array vertices;
+			godot::PackedVector3Array normals;
+			godot::PackedColorArray colors;
+			godot::PackedInt32Array indices;
 		};
 
 		struct TileState {
-			MeshInstance3D *node = nullptr;
-			Ref<ArrayMesh> mesh;
+			godot::MeshInstance3D *node = nullptr;
+			godot::Ref<godot::ArrayMesh> mesh;
 			SurfaceData baked;     // pristine vertices for re-drape
 			double dx = 0.0;       // cached LV95 origin offset
 			double dz = 0.0;
@@ -76,7 +76,7 @@ namespace godot
 
 		// One manifest per configured road directory.
 		struct ManifestGroup {
-			String path;
+			godot::String path;
 			double conv_origin_e = 0.0;
 			double conv_origin_n = 0.0;
 			std::unordered_map<std::string, ManifestEntry> entries;
@@ -99,11 +99,11 @@ namespace godot
 		std::atomic<bool> worker_running{false};
 
 		// Shared material.
-		Ref<StandardMaterial3D> road_material;
+		godot::Ref<godot::StandardMaterial3D> road_material;
 
 		// Configuration.
-		String road_path;
-		PackedStringArray road_paths;
+		godot::String road_path;
+		godot::PackedStringArray road_paths;
 		double origin_east = 2600000.0;
 		double origin_north = 1200000.0;
 		int load_radius_m = 12000;
@@ -113,7 +113,7 @@ namespace godot
 		// Optional elevation DB: when set, road vertices are re-draped onto
 		// the terrain heightmap at load time to remove DTM-mismatch gaps
 		// between the baked road elevation and the rendered terrain.
-		Ref<S3DElevationDB> elevation_db;
+		godot::Ref<S3DElevationDB> elevation_db;
 
 		// Last seen elevation_db epoch; retry only fires when the DB has
 		// new tiles to offer (avoids per-frame mesh rebuilds).
@@ -133,7 +133,7 @@ namespace godot
 		void worker_func();
 
 		void load_manifests();
-		void update_tiles(Vector3 camera_pos);
+		void update_tiles(godot::Vector3 camera_pos);
 		void process_load_results();
 		// Drape baked vertices onto current elevation_db. Returns true if
 		// every vertex hit valid terrain (so the tile no longer needs retry).
@@ -151,11 +151,11 @@ namespace godot
 
 		void _process(double delta) override;
 
-		void set_road_path(const String &p_path);
-		String get_road_path() const;
+		void set_road_path(const godot::String &p_path);
+		godot::String get_road_path() const;
 
-		void set_road_paths(const PackedStringArray &p_paths);
-		PackedStringArray get_road_paths() const;
+		void set_road_paths(const godot::PackedStringArray &p_paths);
+		godot::PackedStringArray get_road_paths() const;
 
 		void set_origin_east(double p_east);
 		double get_origin_east() const;
@@ -169,7 +169,7 @@ namespace godot
 		void set_vertical_offset_m(double p_offset);
 		double get_vertical_offset_m() const;
 
-		void set_elevation_db(const Ref<S3DElevationDB> &p_db) { elevation_db = p_db; }
+		void set_elevation_db(const godot::Ref<S3DElevationDB> &p_db) { elevation_db = p_db; }
 
 		int get_active_tile_count() const;
 	};

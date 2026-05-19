@@ -17,16 +17,16 @@
 #include <atomic>
 #include <string>
 
-namespace godot
+namespace s3d
 {
 
 	// Streams swissTLM3D-derived per-tile tree positions and renders them
 	// using `MultiMeshInstance3D`. One MultiMesh per terrain tile, sharing
 	// a single user-supplied tree mesh (`tree_mesh`). Loads the .bin files
 	// produced by `tools/extract_tlm_forests.py` on background threads.
-	class S3DVegetationManager : public Node3D
+	class S3DVegetationManager : public godot::Node3D
 	{
-		GDCLASS(S3DVegetationManager, Node3D);
+		GDCLASS(S3DVegetationManager, godot::Node3D);
 
 	private:
 		// One tree instance, parsed from the .bin record format.
@@ -52,7 +52,7 @@ namespace godot
 		};
 
 		struct TileState {
-			MultiMeshInstance3D *node = nullptr;
+			godot::MultiMeshInstance3D *node = nullptr;
 			bool loading = false;
 			bool loaded = false;
 			bool no_data = false;
@@ -82,8 +82,8 @@ namespace godot
 		std::atomic<bool> worker_running{false};
 
 		// Configuration.
-		PackedStringArray vegetation_paths;
-		Ref<Mesh> tree_mesh;          // The mesh used per instance.
+		godot::PackedStringArray vegetation_paths;
+		godot::Ref<godot::Mesh> tree_mesh;          // The mesh used per instance.
 		double origin_east = 2600000.0;
 		double origin_north = 1200000.0;
 		int load_radius_m = 4000;
@@ -110,7 +110,7 @@ namespace godot
 		void worker_func();
 
 		void load_manifests();
-		void update_tiles(Vector3 camera_pos);
+		void update_tiles(godot::Vector3 camera_pos);
 		void process_load_results();
 
 	protected:
@@ -122,11 +122,11 @@ namespace godot
 
 		void _process(double delta) override;
 
-		void set_vegetation_paths(const PackedStringArray &p_paths);
-		PackedStringArray get_vegetation_paths() const;
+		void set_vegetation_paths(const godot::PackedStringArray &p_paths);
+		godot::PackedStringArray get_vegetation_paths() const;
 
-		void set_tree_mesh(const Ref<Mesh> &p_mesh);
-		Ref<Mesh> get_tree_mesh() const;
+		void set_tree_mesh(const godot::Ref<godot::Mesh> &p_mesh);
+		godot::Ref<godot::Mesh> get_tree_mesh() const;
 
 		void set_origin_east(double p_east);
 		double get_origin_east() const;

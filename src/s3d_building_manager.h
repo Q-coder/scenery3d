@@ -17,36 +17,36 @@
 #include <atomic>
 #include <string>
 
-namespace godot
+namespace s3d
 {
 
 	// Manages building tiles: loads GLB files in the background,
 	// provides individual building visibility control, and handles
 	// LOD switching between detailed meshes and simple boxes.
-	class S3DBuildingManager : public Node3D
+	class S3DBuildingManager : public godot::Node3D
 	{
-		GDCLASS(S3DBuildingManager, Node3D);
+		GDCLASS(S3DBuildingManager, godot::Node3D);
 
 	public:
 		// Vertex/normal/index triple for one mesh surface (public for static helpers).
 		struct SurfaceData {
-			PackedVector3Array vertices;
-			PackedVector3Array normals;
-			PackedInt32Array indices;
+			godot::PackedVector3Array vertices;
+			godot::PackedVector3Array normals;
+			godot::PackedInt32Array indices;
 		};
 
 	private:
 		// A single building within a tile.
 		struct BuildingInfo {
-			MeshInstance3D *node = nullptr;
-			String uuid;
+			godot::MeshInstance3D *node = nullptr;
+			godot::String uuid;
 			bool user_hidden = false; // Hidden by user (replaced with bespoke model).
 		};
 
 		// State of a loaded building tile.
 		struct TileState {
-			Node3D *root_node = nullptr;          // Container for individual buildings.
-			MeshInstance3D *far_lod_node = nullptr; // Merged box mesh for far rendering.
+			godot::Node3D *root_node = nullptr;          // Container for individual buildings.
+			godot::MeshInstance3D *far_lod_node = nullptr; // Merged box mesh for far rendering.
 			std::vector<BuildingInfo> buildings;
 			bool loading = false;
 			bool loaded = false;
@@ -68,7 +68,7 @@ namespace godot
 			bool success = false;
 			// Parsed building data (ready for Godot mesh creation on main thread).
 			struct BuildingData {
-				String uuid;
+				godot::String uuid;
 				// LOD0: detail mesh (wall + roof surfaces)
 				SurfaceData lod0_wall;
 				SurfaceData lod0_roof;
@@ -120,8 +120,8 @@ namespace godot
 		std::atomic<bool> worker_running{false};
 
 		// Shared materials.
-		Ref<StandardMaterial3D> wall_material;
-		Ref<StandardMaterial3D> roof_material;
+		godot::Ref<godot::StandardMaterial3D> wall_material;
+		godot::Ref<godot::StandardMaterial3D> roof_material;
 
 		// Last known camera position in LV95 (for process_load_results).
 		double last_cam_e = 0;
@@ -130,7 +130,7 @@ namespace godot
 		// Configuration. Multiple buildings dirs are merged into one manifest;
 		// each dir must contain its own manifest.json. The first dir's entry wins
 		// when tile_ids collide (a warning is emitted).
-		PackedStringArray buildings_paths;
+		godot::PackedStringArray buildings_paths;
 		double origin_east = 2600000.0;
 		double origin_north = 1200000.0;
 		int load_radius_m = 8000;    // Distance in meters to load detailed buildings.
@@ -147,7 +147,7 @@ namespace godot
 		void worker_func();
 
 		void load_manifest();
-		void update_buildings(Vector3 camera_pos);
+		void update_buildings(godot::Vector3 camera_pos);
 		void process_load_results();
 
 		// Parse a GLB binary buffer into a LoadResult (called on worker thread).
@@ -164,20 +164,20 @@ namespace godot
 		void _process(double delta) override;
 
 		// Hide/show individual buildings by UUID.
-		void hide_building(const String &uuid);
-		void show_building(const String &uuid);
-		bool is_building_hidden(const String &uuid) const;
-		TypedArray<String> get_hidden_buildings() const;
+		void hide_building(const godot::String &uuid);
+		void show_building(const godot::String &uuid);
+		bool is_building_hidden(const godot::String &uuid) const;
+		godot::TypedArray<godot::String> get_hidden_buildings() const;
 
 		// Getters/Setters.
 		// Multi-path API: a PackedStringArray of buildings dirs.
-		void set_buildings_paths(const PackedStringArray &p_paths);
-		PackedStringArray get_buildings_paths() const;
+		void set_buildings_paths(const godot::PackedStringArray &p_paths);
+		godot::PackedStringArray get_buildings_paths() const;
 		// Compat shim: single-path API. Setter replaces the full list with one
 		// entry (or clears it if the string is empty); getter returns the first
 		// configured path (or "" if none).
-		void set_buildings_path(const String &p_path);
-		String get_buildings_path() const;
+		void set_buildings_path(const godot::String &p_path);
+		godot::String get_buildings_path() const;
 
 		void set_origin_east(double p_east);
 		double get_origin_east() const;

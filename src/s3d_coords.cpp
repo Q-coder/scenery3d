@@ -3,6 +3,8 @@
 
 using namespace godot;
 
+namespace s3d {
+
 S3DCoords::S3DCoords()
 {
 }
@@ -150,3 +152,5 @@ Vector3 S3DCoords::world_to_wgs84(Vector3 world_pos) const
 	// Returns (latitude, longitude, elevation).
 	return Vector3(geo.x, geo.y, world_pos.y);
 }
+
+} // namespace s3d
