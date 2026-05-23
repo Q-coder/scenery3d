@@ -80,6 +80,7 @@ namespace s3d
 			godot::String path;
 			double conv_origin_e = 0.0;
 			double conv_origin_n = 0.0;
+			bool elevation_baked = false; // true → vertex Y already carries ASL + offset
 			std::unordered_map<std::string, ManifestEntry> entries;
 		};
 
