@@ -31,10 +31,11 @@ Pipeline
    UNSIGNED_INT indices.
 6. Write a manifest.json listing each tile with its center and counts.
 
-Vertex coordinate convention (matching the C++ parsers):
+   Vertex coordinate convention (matching the C++ parsers):
     vertex.x = conv_origin_e - east
     vertex.z = north - conv_origin_n
-    vertex.y = 0 (re-draped at runtime)
+    vertex.y = terrain_elevation + vertical_offset  (when --terrain-dir is given)
+               0                                    (legacy, runtime-draped)
 
 OSM data © OpenStreetMap contributors, ODbL 1.0
 https://www.openstreetmap.org/copyright
@@ -44,7 +45,8 @@ Usage
     python3 tools/convert_osm_bw.py \\
         --pbf /Volumes/Data1/scenery_in/osm_bw/baden-wuerttemberg-latest.osm.pbf \\
         --roads-out  /Users/gery/provpilot/scenery/Germany/Baden-Wuertemberg/roads \\
-        --water-out  /Users/gery/provpilot/scenery/Germany/Baden-Wuertemberg/water
+        --water-out  /Users/gery/provpilot/scenery/Germany/Baden-Wuertemberg/water \\
+        --terrain-dir /Users/gery/provpilot/scenery/Germany/terrain
 """
 
 from __future__ import annotations
@@ -55,8 +57,9 @@ import math
 import os
 import struct
 import sys
+import gc
 import time
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -167,6 +170,12 @@ DEFAULT_DENSIFY_M = 10.0
 # at sharp turns.
 MITER_LIMIT = 2.5
 
+# Vertical offset baked into GLB vertex Y (metres above terrain surface).
+# Roads sit slightly above terrain to prevent z-fighting; water is raised
+# more so it stays visually above the ground even on gentle slopes.
+DEFAULT_ROAD_VERTICAL_OFFSET_M = 0.4
+DEFAULT_WATER_VERTICAL_OFFSET_M = 1.5
+
 # Road class → (width meters, sRGB tuple 0..1, priority).
 # Only proper drivable classes are included. Tracks, paths, footways,
 # cycleways, bridleways, steps and pedestrian zones are intentionally
@@ -190,6 +199,21 @@ ROAD_CLASSES: Dict[str, Tuple[float, Tuple[float, float, float], int]] = {
     "service":        (3.5,  (0.74, 0.74, 0.74), 3),
 }
 
+# Railway classes rendered alongside roads (same road GLB tiles).
+# Drawn as thin dark ribbons. subway/U-Bahn included where visible above ground.
+RAILWAY_CLASSES: Dict[str, Tuple[float, Tuple[float, float, float], int]] = {
+    "rail":           (3.0, (0.30, 0.30, 0.30), 8),
+    "light_rail":     (2.5, (0.38, 0.38, 0.38), 7),
+    "tram":           (2.0, (0.42, 0.42, 0.42), 6),
+    "subway":         (2.5, (0.28, 0.32, 0.38), 7),
+}
+
+# Unified lookup for all road + railway classes.
+ALL_ROAD_CLASSES: Dict[str, Tuple[float, Tuple[float, float, float], int]] = {
+    **{k: v for k, v in ROAD_CLASSES.items()},
+    **{f"railway:{k}": v for k, v in RAILWAY_CLASSES.items()},
+}
+
 # Water classes. Streams and ditches are omitted: OSM coverage in BW is
 # extremely noisy and the per-vertex drape sits poorly on tight gullies.
 WATER_LINE_CLASSES: Dict[str, float] = {
@@ -197,6 +221,81 @@ WATER_LINE_CLASSES: Dict[str, float] = {
     "canal": 8.0,
 }
 WATER_COLOR = (0.28, 0.46, 0.62)
+
+
+# ── Elevation sampler ───────────────────────────────────────────────────────
+
+class ElevationSampler:
+    """Loads scenery3d .raw terrain tiles on demand and returns bilinear-
+    interpolated elevation in metres (LV95).
+
+    Tile format: headerless 1024×1024 float32 little-endian, named
+    ``tile_{tile_e}_{tile_n}.raw`` where tile_e/tile_n are the LV95
+    coordinates of the SW corner (multiples of 1024 m).
+    Pixel (0,0) = SE corner; columns run E→W, rows run S→N — the same
+    convention used by S3DElevationDB::get_elevation in C++.
+    """
+
+    TILE_PX = 1024  # pixels per tile edge
+
+    # Keep at most this many 4 MB terrain tiles in RAM at once (~128 MB).
+    MAX_CACHE = 32
+
+    def __init__(self, terrain_dir: str) -> None:
+        self._dir = Path(terrain_dir)
+        # OrderedDict used as an LRU cache: most-recently-used at the end.
+        self._cache: OrderedDict = OrderedDict()
+        # Separate set tracks tiles known to be absent so we skip disk I/O.
+        self._missing: set = set()
+        self.n_miss = 0    # tiles that could not be found on disk
+
+    def _load(self, tile_e: int, tile_n: int) -> Optional[np.ndarray]:
+        key = (tile_e, tile_n)
+        if key in self._missing:
+            return None
+        if key in self._cache:
+            # Move to end (most-recently-used).
+            self._cache.move_to_end(key)
+            return self._cache[key]
+        path = self._dir / f"tile_{tile_e}_{tile_n}.raw"
+        if not path.exists():
+            self._missing.add(key)
+            self.n_miss += 1
+            return None
+        data = np.frombuffer(path.read_bytes(), dtype="<f4").reshape(
+            self.TILE_PX, self.TILE_PX
+        )
+        self._cache[key] = data
+        # Evict least-recently-used entry when over the limit.
+        if len(self._cache) > self.MAX_CACHE:
+            self._cache.popitem(last=False)
+        return data
+
+    def sample(self, east: float, north: float) -> float:
+        """Bilinear elevation at LV95 (east, north). Returns NaN if no tile."""
+        px = self.TILE_PX
+        tile_e = int(math.floor(east / px)) * px
+        tile_n = int(math.floor(north / px)) * px
+        data = self._load(tile_e, tile_n)
+        if data is None:
+            return float("nan")
+        # Local coords within tile: local_x grows west→east, local_z south→north.
+        local_x = east - tile_e   # [0, TILE_PX)
+        local_z = north - tile_n  # [0, TILE_PX)
+        # Pixel space: col 0 = east edge, col px-1 = west edge (mirrors C++ code).
+        pcol = (1.0 - local_x / px) * (px - 1)
+        prow = local_z / px * (px - 1)
+        c0 = max(0, min(px - 2, int(pcol)))
+        r0 = max(0, min(px - 2, int(prow)))
+        c1, r1 = c0 + 1, r0 + 1
+        fc, fr = pcol - c0, prow - r0
+        h = (
+            data[r0, c0] * (1 - fc) * (1 - fr)
+            + data[r0, c1] * fc * (1 - fr)
+            + data[r1, c0] * (1 - fc) * fr
+            + data[r1, c1] * fc * fr
+        )
+        return float(h)
 
 
 # ── Geometry helpers ────────────────────────────────────────────────────────
@@ -400,10 +499,14 @@ def extrude_ribbon(
     pts_xz: Sequence[Tuple[float, float]],
     width: float,
     color_u8: Tuple[int, int, int, int],
+    pts_y: Optional[Sequence[float]] = None,
 ) -> None:
-    """Append a flat ribbon (y=0) following pts_xz with given width.
+    """Append a flat ribbon following pts_xz with given width.
 
     pts_xz contains already-converted (vx, vz) tile-local coordinates.
+    pts_y, when provided, gives the pre-baked terrain elevation (metres
+    above sea level plus vertical offset) for each centerline point.
+    When None, vertex Y is 0 (legacy — runtime drape handles it).
     """
     n = len(pts_xz)
     if n < 2 or width <= 0:
@@ -451,9 +554,10 @@ def extrude_ribbon(
                 pz *= max_off / l
         perps.append((px, pz))
 
-    for (x, z), (px, pz) in zip(pts_xz, perps):
-        buf.verts.append((x + px, 0.0, z + pz))
-        buf.verts.append((x - px, 0.0, z - pz))
+    for i, ((x, z), (px, pz)) in enumerate(zip(pts_xz, perps)):
+        y = float(pts_y[i]) if pts_y is not None else 0.0
+        buf.verts.append((x + px, y, z + pz))
+        buf.verts.append((x - px, y, z - pz))
         buf.normals.append((0.0, 1.0, 0.0))
         buf.normals.append((0.0, 1.0, 0.0))
         buf.colors.append(color_u8)
@@ -471,8 +575,13 @@ def emit_polygon(
     buf: MeshBuf,
     rings_xz: Sequence[Sequence[Tuple[float, float]]],
     color_u8: Tuple[int, int, int, int],
+    flat_y: float = 0.0,
 ) -> None:
-    """Triangulate a polygon (outer + holes) using mapbox_earcut."""
+    """Triangulate a polygon (outer + holes) using mapbox_earcut.
+
+    flat_y is the pre-baked terrain elevation for all vertices of this
+    polygon (using a per-polygon mean so water bodies stay visually flat).
+    """
     if not rings_xz or len(rings_xz[0]) < 3:
         return
     flat: List[float] = []
@@ -495,7 +604,7 @@ def emit_polygon(
         return
     base = len(buf.verts)
     for x, z in verts2d:
-        buf.verts.append((float(x), 0.0, float(z)))
+        buf.verts.append((float(x), flat_y, float(z)))
         buf.normals.append((0.0, 1.0, 0.0))
         buf.colors.append(color_u8)
     for idx in tris:
@@ -651,6 +760,24 @@ class FeatureCollector(osmium.SimpleHandler):
                     return
                 self.roads.append((hwy, pts))
             return
+        railway = tags.get("railway")
+        rwy_key = f"railway:{railway}" if railway else None
+        if rwy_key and rwy_key in ALL_ROAD_CLASSES:
+            # Skip underground tunnels: they're underground and would poke
+            # through the terrain surface.
+            if tags.get("tunnel") in ("yes", "true", "1"):
+                return
+            try:
+                pts = [(n.lon, n.lat) for n in w.nodes if n.location.valid()]
+            except osmium.InvalidLocationError:
+                return
+            if len(pts) >= 2:
+                mid = pts[len(pts) // 2]
+                if not self._inside(mid[0], mid[1]):
+                    self.n_skipped_boundary += 1
+                    return
+                self.roads.append((rwy_key, pts))
+            return
         wway = tags.get("waterway")
         if wway in WATER_LINE_CLASSES:
             # Skip if the way is itself a polygon (riverbank): handled via area().
@@ -737,6 +864,17 @@ def main() -> int:
     ap.add_argument("--densify-m", type=float, default=DEFAULT_DENSIFY_M,
                     help=f"Max segment length in metres before splitting a road "
                          f"polyline (helps terrain drape, default {DEFAULT_DENSIFY_M}).")
+    ap.add_argument("--terrain-dir", default=None,
+                    help="Directory containing .raw terrain tiles "
+                         "(tile_{e}_{n}.raw, 1024×1024 float32 LE). "
+                         "When provided, vertex elevation is pre-sampled and "
+                         "baked into the GLB so no runtime draping is needed.")
+    ap.add_argument("--road-offset", type=float, default=DEFAULT_ROAD_VERTICAL_OFFSET_M,
+                    help=f"Metres above terrain surface baked into road vertex Y "
+                         f"(default {DEFAULT_ROAD_VERTICAL_OFFSET_M}).")
+    ap.add_argument("--water-offset", type=float, default=DEFAULT_WATER_VERTICAL_OFFSET_M,
+                    help=f"Metres above terrain surface baked into water vertex Y "
+                         f"(default {DEFAULT_WATER_VERTICAL_OFFSET_M}).")
     ap.add_argument("--boundary-poly", default=None,
                     help="Optional Geofabrik .poly file (WGS84) used to clip "
                          "features to the political boundary. Defaults to "
@@ -747,6 +885,22 @@ def main() -> int:
     if not pbf.exists():
         print(f"ERROR: PBF not found: {pbf}", file=sys.stderr)
         return 1
+
+    # Set up terrain elevation sampler if a terrain directory was given.
+    sampler: Optional[ElevationSampler] = None
+    if args.terrain_dir:
+        terrain_path = Path(args.terrain_dir)
+        if not terrain_path.is_dir():
+            print(f"ERROR: terrain-dir not found: {terrain_path}", file=sys.stderr)
+            return 1
+        sampler = ElevationSampler(str(terrain_path))
+        print(f"Terrain elevation sampler: {terrain_path}", flush=True)
+    else:
+        print("No --terrain-dir provided; vertex Y will be 0 "
+              "(runtime draping still needed).", flush=True)
+
+    road_offset = args.road_offset
+    water_offset = args.water_offset
 
     print(f"Reading {pbf} ({pbf.stat().st_size / (1024 * 1024):.0f} MiB)…", flush=True)
     t0 = time.time()
@@ -804,18 +958,34 @@ def main() -> int:
                 for piece in pieces:
                     road_tiles[tile_key].append((hwy, piece))
 
+        # Free the raw OSM road list — no longer needed now that road_tiles
+        # holds all reprojected pieces.  This cuts peak RSS by ~1–2 GB.
+        coll.roads.clear()
+        gc.collect()
+
         print(f"  building meshes for {len(road_tiles)} tiles…", flush=True)
         roads_out = Path(args.roads_out)
         manifest_tiles: Dict[str, dict] = {}
         kept = 0
-        for (tx, tn), feats in sorted(road_tiles.items()):
+        for (tx, tn) in sorted(road_tiles):
+            feats = road_tiles.pop((tx, tn))
             buf = MeshBuf()
             seg_count = 0
             for hwy, pts in feats:
-                width, color, _prio = ROAD_CLASSES[hwy]
+                width, color, _prio = ALL_ROAD_CLASSES[hwy]
                 color_u8 = color_to_u8(color)
                 pts_xz = [(conv_e - e, n - conv_n) for (e, n) in pts]
-                extrude_ribbon(buf, pts_xz, width, color_u8)
+                # Pre-bake terrain elevation into vertex Y when a terrain
+                # directory is available; avoids visible height-snapping pops
+                # during runtime that occur when the elevation DB loads later.
+                if sampler is not None:
+                    baked_y: Optional[List[float]] = []
+                    for e, n in pts:
+                        h = sampler.sample(e, n)
+                        baked_y.append((h if not math.isnan(h) else 0.0) + road_offset)
+                else:
+                    baked_y = None
+                extrude_ribbon(buf, pts_xz, width, color_u8, baked_y)
                 seg_count += len(pts) - 1
             if buf.empty():
                 continue
@@ -836,10 +1006,15 @@ def main() -> int:
                 "vertices": len(buf.verts),
             }
             kept += 1
+        if sampler is not None:
+            print(f"  terrain miss count during road baking: {sampler.n_miss}",
+                  flush=True)
+            sampler.n_miss = 0
         manifest = {
             "format": "glb",
             "source": "OpenStreetMap (Geofabrik baden-wuerttemberg)",
             "license": "ODbL 1.0 (© OpenStreetMap contributors)",
+            "elevation_baked": sampler is not None,
             "tile_size_m": TILE_SIZE_M,
             "conversion_origin_e": conv_e,
             "conversion_origin_n": conv_n,
@@ -906,6 +1081,13 @@ def main() -> int:
                     if clipped_rings:
                         water_poly_tiles[(tx, tn)].append(clipped_rings)
 
+        # Free raw OSM water collections and reprojected polygon arrays.
+        coll.water_lines.clear()
+        coll.water_polys.clear()
+        proj_polys.clear()
+        bbox_polys.clear()
+        gc.collect()
+
         all_water_tiles = set(water_line_tiles) | set(water_poly_tiles)
         print(f"  building meshes for {len(all_water_tiles)} tiles…", flush=True)
         water_out = Path(args.water_out)
@@ -916,17 +1098,39 @@ def main() -> int:
             buf = MeshBuf()
             n_poly = 0
             n_stream = 0
-            for rings in water_poly_tiles.get((tx, tn), []):
+            for rings in water_poly_tiles.pop((tx, tn), []):
                 rings_xz = [
                     [(conv_e - e, n - conv_n) for (e, n) in ring]
                     for ring in rings
                 ]
-                emit_polygon(buf, rings_xz, color_u8)
+                # Polygons (lakes, reservoirs) are flat water bodies: use the
+                # mean terrain elevation of the outer ring so the whole polygon
+                # sits at a consistent height rather than being warped by
+                # per-vertex terrain noise.
+                if sampler is not None:
+                    hs_poly = []
+                    for vx, vz in rings_xz[0]:
+                        h = sampler.sample(conv_e - vx, vz + conv_n)
+                        if not math.isnan(h):
+                            hs_poly.append(h)
+                    flat_y = (sum(hs_poly) / len(hs_poly) if hs_poly else 0.0) + water_offset
+                else:
+                    flat_y = 0.0
+                emit_polygon(buf, rings_xz, color_u8, flat_y)
                 n_poly += 1
-            for wway, pts in water_line_tiles.get((tx, tn), []):
+            for wway, pts in water_line_tiles.pop((tx, tn), []):
                 width = WATER_LINE_CLASSES[wway]
                 pts_xz = [(conv_e - e, n - conv_n) for (e, n) in pts]
-                extrude_ribbon(buf, pts_xz, width, color_u8)
+                # Rivers/canals as ribbons: per-vertex elevation so the ribbon
+                # follows the valley floor.
+                if sampler is not None:
+                    water_baked_y: Optional[List[float]] = []
+                    for e, n in pts:
+                        h = sampler.sample(e, n)
+                        water_baked_y.append((h if not math.isnan(h) else 0.0) + water_offset)
+                else:
+                    water_baked_y = None
+                extrude_ribbon(buf, pts_xz, width, color_u8, water_baked_y)
                 n_stream += 1
             if buf.empty():
                 continue
@@ -947,10 +1151,14 @@ def main() -> int:
                 "vertices": len(buf.verts),
             }
             kept += 1
+        if sampler is not None:
+            print(f"  terrain miss count during water baking: {sampler.n_miss}",
+                  flush=True)
         manifest = {
             "format": "glb",
             "source": "OpenStreetMap (Geofabrik baden-wuerttemberg)",
             "license": "ODbL 1.0 (© OpenStreetMap contributors)",
+            "elevation_baked": sampler is not None,
             "tile_size_m": TILE_SIZE_M,
             "conversion_origin_e": conv_e,
             "conversion_origin_n": conv_n,
@@ -963,7 +1171,6 @@ def main() -> int:
 
     print(f"Total: {time.time() - t0:.1f}s")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

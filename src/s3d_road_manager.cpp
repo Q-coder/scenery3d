@@ -139,6 +139,13 @@ struct JsonValue {
 		auto *v = get(key);
 		return (v && v->type == STRING) ? v->str_val : def;
 	}
+	bool get_bool(const std::string &key, bool def = false) const {
+		auto *v = get(key);
+		if (!v) return def;
+		if (v->type == BOOL) return v->bool_val;
+		if (v->type == NUMBER) return v->num_val != 0;
+		return def;
+	}
 };
 
 void skip_ws(const char *&p, const char *end) {
@@ -409,6 +416,7 @@ void S3DRoadManager::load_manifests()
 		group.path = dir;
 		group.conv_origin_e = root.get_double("conversion_origin_e", origin_east);
 		group.conv_origin_n = root.get_double("conversion_origin_n", origin_north);
+		group.elevation_baked = root.get_bool("elevation_baked", false);
 
 		auto *tiles_obj = root.get("tiles");
 		if (!tiles_obj || tiles_obj->type != JsonValue::OBJECT) {
@@ -565,17 +573,20 @@ void S3DRoadManager::process_load_results()
 		// conversion-origin offset.
 		size_t colon = result.tile_id.find(':');
 		double dx = 0.0, dz = 0.0;
+		bool elevation_baked = false;
 		if (colon != std::string::npos) {
 			size_t gi = (size_t)std::stoul(result.tile_id.substr(0, colon));
 			if (gi < manifests.size()) {
 				dx = origin_east - manifests[gi].conv_origin_e;
 				dz = manifests[gi].conv_origin_n - origin_north;
+				elevation_baked = manifests[gi].elevation_baked;
 			}
 		}
 
 		// Store the pristine surface and offsets so we can re-drape later
 		// if elevation_db wasn't yet populated for the relevant terrain
 		// tile when this road tile finished loading.
+		// When elevation is already baked into the GLB we skip all of this.
 		state.dx = dx;
 		state.dz = dz;
 		state.baked = result.surface;
@@ -609,16 +620,18 @@ void S3DRoadManager::process_load_results()
 		// material — actually it IS set above, so they neither cast nor
 		// receive, which is what we want for thin overlay geometry.
 		mi->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_OFF);
-		// When vertices are draped, they already carry absolute ASL Y, so the
-		// root node sits at y=0. Without elevation_db, keep the legacy fixed
-		// offset for backward compatibility.
-		float root_y = elevation_db.is_valid() ? 0.0f : (float)vertical_offset_m;
+		// When elevation is baked vertex Y is already ASL+offset; always
+		// place the root at y=0.  For un-baked tiles keep the legacy
+		// behaviour: y=vertical_offset_m when no elevation_db is set.
+		float root_y = (elevation_baked || elevation_db.is_valid()) ? 0.0f : (float)vertical_offset_m;
 		mi->set_position(Vector3((float)dx, root_y, (float)dz));
 		add_child(mi);
 
 		state.node = mi;
 		state.loaded = true;
-		state.drape_pending = elevation_db.is_valid();
+		// Draping is only needed when the GLB has y=0 vertices and an
+		// elevation_db is available to resolve them at runtime.
+		state.drape_pending = !elevation_baked && elevation_db.is_valid();
 
 		// Hide while drape is incomplete: leaving a partially-draped tile
 		// visible drops un-resolved vertices to their baked Y (0 for the BW
@@ -629,10 +642,7 @@ void S3DRoadManager::process_load_results()
 			mi->set_visible(false);
 		}
 
-		// First drape attempt. The mesh becomes presentable as soon as ANY
-		// vertex resolves against the elevation DB — unresolved ones use the
-		// mean of resolved heights. Tiles where nothing resolved stay hidden
-		// and pending so we can retry when LGL tiles arrive.
+		// First drape attempt (only for tiles that need it).
 		if (state.drape_pending) {
 			bool full = false;
 			if (apply_drape(state, full)) {
@@ -642,6 +652,11 @@ void S3DRoadManager::process_load_results()
 					state.baked = SurfaceData(); // free memory
 				}
 			}
+		}
+
+		// Elevation already baked → no need to keep the raw surface copy.
+		if (elevation_baked) {
+			state.baked = SurfaceData();
 		}
 	}
 }

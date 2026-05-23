@@ -139,6 +139,13 @@ struct JsonValue {
 		auto *v = get(key);
 		return (v && v->type == STRING) ? v->str_val : def;
 	}
+	bool get_bool(const std::string &key, bool def = false) const {
+		auto *v = get(key);
+		if (!v) return def;
+		if (v->type == BOOL) return v->bool_val;
+		if (v->type == NUMBER) return v->num_val != 0;
+		return def;
+	}
 };
 
 void skip_ws(const char *&p, const char *end) {
@@ -409,6 +416,7 @@ void S3DWaterManager::load_manifests()
 		group.path = dir;
 		group.conv_origin_e = root.get_double("conversion_origin_e", origin_east);
 		group.conv_origin_n = root.get_double("conversion_origin_n", origin_north);
+		group.elevation_baked = root.get_bool("elevation_baked", false);
 
 		auto *tiles_obj = root.get("tiles");
 		if (!tiles_obj || tiles_obj->type != JsonValue::OBJECT) {
@@ -573,11 +581,13 @@ void S3DWaterManager::process_load_results()
 		// conversion-origin offset.
 		size_t colon = result.tile_id.find(':');
 		double dx = 0.0, dz = 0.0;
+		bool elevation_baked = false;
 		if (colon != std::string::npos) {
 			size_t gi = (size_t)std::stoul(result.tile_id.substr(0, colon));
 			if (gi < manifests.size()) {
 				dx = origin_east - manifests[gi].conv_origin_e;
 				dz = manifests[gi].conv_origin_n - origin_north;
+				elevation_baked = manifests[gi].elevation_baked;
 			}
 		}
 
@@ -609,15 +619,18 @@ void S3DWaterManager::process_load_results()
 		// produce a dark stripe artefact through the terrain when the
 		// surface sits slightly below it.
 		mi->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_OFF);
-		// When draped, vertices carry absolute ASL Y; otherwise keep the
-		// legacy flat offset (for CH water GLBs that already bake Y).
-		float root_y = elevation_db.is_valid() ? 0.0f : (float)vertical_offset_m;
+		// When elevation is baked vertex Y is already ASL+offset; always
+		// place the root at y=0.  For un-baked tiles keep the legacy
+		// behaviour: y=vertical_offset_m when no elevation_db is set.
+		float root_y = (elevation_baked || elevation_db.is_valid()) ? 0.0f : (float)vertical_offset_m;
 		mi->set_position(Vector3((float)dx, root_y, (float)dz));
 		add_child(mi);
 
 		state.node = mi;
 		state.loaded = true;
-		state.drape_pending = elevation_db.is_valid();
+		// Draping is only needed when the GLB has y=0 vertices and an
+		// elevation_db is available to resolve them at runtime.
+		state.drape_pending = !elevation_baked && elevation_db.is_valid();
 		if (state.drape_pending) {
 			mi->set_visible(false);
 		}
@@ -630,6 +643,11 @@ void S3DWaterManager::process_load_results()
 					state.baked = SurfaceData();
 				}
 			}
+		}
+
+		// Elevation already baked → no need to keep the raw surface copy.
+		if (elevation_baked) {
+			state.baked = SurfaceData();
 		}
 	}
 }
