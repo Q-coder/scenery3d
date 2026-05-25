@@ -32,6 +32,10 @@ void Scenery3D::_bind_methods()
 	ClassDB::bind_method(D_METHOD("get_tile_size"), &Scenery3D::get_tile_size);
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "tile_size"), "set_tile_size", "get_tile_size");
 
+	ClassDB::bind_method(D_METHOD("set_tile_px", "px"), &Scenery3D::set_tile_px);
+	ClassDB::bind_method(D_METHOD("get_tile_px"), &Scenery3D::get_tile_px);
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "tile_px"), "set_tile_px", "get_tile_px");
+
 	ClassDB::bind_method(D_METHOD("set_load_radius", "radius"), &Scenery3D::set_load_radius);
 	ClassDB::bind_method(D_METHOD("get_load_radius"), &Scenery3D::get_load_radius);
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "load_radius"), "set_load_radius", "get_load_radius");
@@ -114,6 +118,7 @@ void Scenery3D::_ready()
 	tile_manager = memnew(S3DTileManager);
 	add_child(tile_manager);
 	tile_manager->set_tile_size(tile_size);
+	tile_manager->set_tile_px(tile_px);
 	tile_manager->set_load_radius(load_radius);
 	tile_manager->set_far_radius(far_radius);
 	tile_manager->set_data_paths(data_paths);
@@ -243,6 +248,19 @@ void Scenery3D::set_tile_size(int p_size)
 int Scenery3D::get_tile_size() const
 {
 	return tile_size;
+}
+
+void Scenery3D::set_tile_px(int p_px)
+{
+	tile_px = p_px;
+	if (tile_manager) {
+		tile_manager->set_tile_px(p_px);
+	}
+}
+
+int Scenery3D::get_tile_px() const
+{
+	return tile_px;
 }
 
 void Scenery3D::set_load_radius(int p_radius)

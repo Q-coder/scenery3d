@@ -24,6 +24,7 @@ namespace s3d
 
 	private:
 		int tile_size = 1024;
+		int tile_px = 0;
 		int load_radius = 8;
 		int far_radius = 200;
 		double origin_east = 2600000.0;
@@ -65,6 +66,9 @@ namespace s3d
 
 		void set_tile_size(int p_size);
 		int get_tile_size() const;
+
+		void set_tile_px(int p_px);
+		int get_tile_px() const;
 
 		void set_load_radius(int p_radius);
 		int get_load_radius() const;

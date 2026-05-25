@@ -160,10 +160,11 @@ void S3DTileManager::worker_func()
 			int csize = req.chunk_tile_count;
 			int base_ei = req.chunk_grid_ei * csize;
 			int base_ni = req.chunk_grid_ni * csize;
-			int ts = req.tile_size;
+			int ts_m = req.tile_size; // meters per source tile axis
+			int ts_px = req.tile_px > 0 ? req.tile_px : req.tile_size; // pixels per source tile axis
 
 			result.composite_res = cres;
-			result.tile_size = csize * ts;
+			result.tile_size = csize * ts_m;
 			result.desired_lod = 0;
 
 			std::vector<float> composite(cres * cres, NAN);
@@ -171,7 +172,7 @@ void S3DTileManager::worker_func()
 
 			// Cache tile data to avoid re-reading the same file.
 			std::unordered_map<uint64_t, std::vector<uint8_t>> tile_cache;
-			size_t expected = (size_t)ts * ts * 4;
+			size_t expected = (size_t)ts_px * ts_px * 4;
 
 			for (int cy = 0; cy < cres; cy++) {
 				for (int cx = 0; cx < cres; cx++) {
@@ -180,11 +181,11 @@ void S3DTileManager::worker_func()
 					double frac_x = (double)cx / (cres - 1); // 0=east edge, 1=west edge
 					double frac_y = (double)cy / (cres - 1); // 0=south edge, 1=north edge
 
-					double lv95_e = (double)(base_ei + csize) * ts - frac_x * csize * ts;
-					double lv95_n = (double)base_ni * ts + frac_y * csize * ts;
+					double lv95_e = (double)(base_ei + csize) * ts_m - frac_x * csize * ts_m;
+					double lv95_n = (double)base_ni * ts_m + frac_y * csize * ts_m;
 
-					int tei = (int)std::floor(lv95_e / ts);
-					int tni = (int)std::floor(lv95_n / ts);
+					int tei = (int)std::floor(lv95_e / ts_m);
+					int tni = (int)std::floor(lv95_n / ts_m);
 
 					// Clamp to chunk bounds.
 					if (tei < base_ei) tei = base_ei;
@@ -195,8 +196,8 @@ void S3DTileManager::worker_func()
 					uint64_t tkey = tile_key(tei, tni);
 					auto cache_it = tile_cache.find(tkey);
 					if (cache_it == tile_cache.end()) {
-						int lv95_east = tei * ts;
-						int lv95_north = tni * ts;
+						int lv95_east = tei * ts_m;
+						int lv95_north = tni * ts_m;
 						std::string tname = "/tile_"
 							+ std::to_string(lv95_east) + "_"
 							+ std::to_string(lv95_north) + ".raw";
@@ -235,7 +236,7 @@ void S3DTileManager::worker_func()
 						// with a plausible elevation.
 						if (!data.empty()) {
 							float *d = reinterpret_cast<float *>(data.data());
-							int sz = ts;
+							int sz = ts_px;
 							for (int r = 0; r < sz; r++) {
 								float last = 0.0f;
 								for (int c = 0; c < sz; c++) {
@@ -279,28 +280,28 @@ void S3DTileManager::worker_func()
 					// per-tile gap-fill above, and dramatically reduces the
 					// chance of a whole chunk being classified as empty.
 					const float *tile_f = reinterpret_cast<const float *>(cache_it->second.data());
-					double local_e = lv95_e - (double)tei * ts;
-					double local_n = lv95_n - (double)tni * ts;
+					double local_e = lv95_e - (double)tei * ts_m;
+					double local_n = lv95_n - (double)tni * ts_m;
 
-					int pcol_c = (int)std::round((ts - local_e) / ts * (ts - 1));
-					int prow_c = (int)std::round(local_n / ts * (ts - 1));
-					pcol_c = std::max(0, std::min(ts - 1, pcol_c));
-					prow_c = std::max(0, std::min(ts - 1, prow_c));
+					int pcol_c = (int)std::round((ts_m - local_e) / ts_m * (ts_px - 1));
+					int prow_c = (int)std::round(local_n / ts_m * (ts_px - 1));
+					pcol_c = std::max(0, std::min(ts_px - 1, pcol_c));
+					prow_c = std::max(0, std::min(ts_px - 1, prow_c));
 
 					// Supersampling window: ±K pixels around the nominal
 					// sample, clamped to the tile. K ≈ half a composite step
-					// (ts / (cres-1) / 2), capped to keep cost bounded.
-					int half = std::min(8, (int)(ts / (cres - 1) / 2));
+					// (ts_px / (cres-1) / 2), capped to keep cost bounded.
+					int half = std::min(8, (int)(ts_px / (cres - 1) / 2));
 
 					float sum = 0.0f;
 					int cnt = 0;
 					for (int dy = -half; dy <= half; dy++) {
 						int pr = prow_c + dy;
-						if (pr < 0 || pr >= ts) continue;
+						if (pr < 0 || pr >= ts_px) continue;
 						for (int dx = -half; dx <= half; dx++) {
 							int pc = pcol_c + dx;
-							if (pc < 0 || pc >= ts) continue;
-							float v = tile_f[(size_t)pr * ts + pc];
+							if (pc < 0 || pc >= ts_px) continue;
+							float v = tile_f[(size_t)pr * ts_px + pc];
 							if (v != 0.0f) { sum += v; cnt++; }
 						}
 					}
@@ -352,8 +353,8 @@ void S3DTileManager::worker_func()
 					for (int tdx = 0; tdx < csize; tdx++) {
 						int tei = base_ei + tdx;
 						int tni = base_ni + tdy;
-						int lv95_e = tei * ts;
-						int lv95_n = tni * ts;
+						int lv95_e = tei * ts_m;
+						int lv95_n = tni * ts_m;
 						std::string fname = "/ortho_"
 							+ std::to_string(lv95_e) + "_" + std::to_string(lv95_n) + ".jpg";
 
@@ -381,10 +382,11 @@ void S3DTileManager::worker_func()
 		} else {
 			// --- Regular tile: read single file, trying each candidate path ---
 			result.tile_size = req.tile_size;
+			result.tile_px = req.tile_px > 0 ? req.tile_px : req.tile_size;
 			result.desired_lod = req.desired_lod;
 
-			size_t expected_size = (size_t)req.tile_size * req.tile_size * 4;
-			size_t sample_count = (size_t)req.tile_size * req.tile_size;
+			size_t expected_size = (size_t)result.tile_px * result.tile_px * 4;
+			size_t sample_count = (size_t)result.tile_px * result.tile_px;
 			// Read all sources and merge per-pixel, with LATER sources
 			// overriding earlier ones at any pixel where the later source
 			// is non-zero. This lets the user encode authoritative priority
@@ -428,7 +430,7 @@ void S3DTileManager::worker_func()
 			// producing the long horizontal streaks visible in BW.
 			if (result.success) {
 				float *d = reinterpret_cast<float *>(result.raw_bytes.data());
-				int sz = req.tile_size;
+				int sz = result.tile_px;
 				size_t total = (size_t)sz * sz;
 				std::vector<float> Lv(total, 0.0f), Rv(total, 0.0f);
 				std::vector<float> Uv(total, 0.0f), Dv(total, 0.0f);
@@ -766,7 +768,8 @@ void S3DTileManager::process_load_results(int &verts_generated)
 
 		int desired_lod = state.desired_lod >= 0 ? state.desired_lod : result.desired_lod;
 		int stride = 1 << desired_lod;
-		int verts_per_axis = (result.tile_size - 1) / stride + 1;
+		int tpx = result.tile_px > 0 ? result.tile_px : result.tile_size;
+		int verts_per_axis = (tpx - 1) / stride + 1;
 		int tile_verts = verts_per_axis * verts_per_axis;
 
 		if (verts_generated + tile_verts > VERTEX_BUDGET_PER_FRAME && verts_generated > 0) {
@@ -782,7 +785,7 @@ void S3DTileManager::process_load_results(int &verts_generated)
 		result.raw_bytes.clear();
 
 		Ref<Image> heightmap = Image::create_from_data(
-			result.tile_size, result.tile_size, false, Image::FORMAT_RF, bytes);
+			tpx, tpx, false, Image::FORMAT_RF, bytes);
 		if (heightmap.is_null()) {
 			state.no_data = true;
 			continue;
@@ -902,6 +905,10 @@ void S3DTileManager::_bind_methods()
 	ClassDB::bind_method(D_METHOD("get_tile_size"), &S3DTileManager::get_tile_size);
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "tile_size"), "set_tile_size", "get_tile_size");
 
+	ClassDB::bind_method(D_METHOD("set_tile_px", "px"), &S3DTileManager::set_tile_px);
+	ClassDB::bind_method(D_METHOD("get_tile_px"), &S3DTileManager::get_tile_px);
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "tile_px"), "set_tile_px", "get_tile_px");
+
 	ClassDB::bind_method(D_METHOD("set_load_radius", "radius"), &S3DTileManager::set_load_radius);
 	ClassDB::bind_method(D_METHOD("get_load_radius"), &S3DTileManager::get_load_radius);
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "load_radius"), "set_load_radius", "get_load_radius");
@@ -1016,6 +1023,7 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 					req.paths.push_back(std::string((data_paths[i] + tname).utf8().get_data()));
 				}
 				req.tile_size = tile_size;
+				req.tile_px = effective_tile_px();
 				req.desired_lod = desired_lod;
 				req.distance = dist;
 				req.ortho_paths = ortho_paths_for_tile(ei, ni, desired_lod);
@@ -1040,15 +1048,25 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 		int dist = std::max(std::abs(ei - cam_ei), std::abs(ni - cam_ni));
 		if (dist > unload_radius) {
 			if (have_chunks && dist <= far_radius) {
-				// Tile is in chunk zone — only unload if chunk is ready.
+				// Tile is in chunk zone — only defer unload while the
+				// covering chunk is still loading (to avoid a visible gap
+				// during the close→far handoff). If the chunk is either
+				// already loaded OR not tracked at all (camera moved on,
+				// chunk aged out), drop the tile. Without the
+				// "not tracked" case, stale close-ring tiles from a
+				// previous airport pile up indefinitely after each
+				// teleport — driving `tiles.size()` from ~10k to >30k
+				// across a handful of jumps and tanking framerate.
 				int cg_ei = (ei >= 0) ? ei / chunk_size : (ei - chunk_size + 1) / chunk_size;
 				int cg_ni = (ni >= 0) ? ni / chunk_size : (ni - chunk_size + 1) / chunk_size;
 				uint64_t ckey = tile_key(cg_ei, cg_ni);
 				auto cit = chunks.find(ckey);
-				if (cit != chunks.end() && !cit->second.loading && cit->second.node) {
+				if (cit == chunks.end()) {
+					to_remove.push_back(key);
+				} else if (!cit->second.loading && cit->second.node) {
 					to_remove.push_back(key);
 				}
-				// else: keep tile until chunk is ready
+				// else: chunk is currently loading — defer one frame.
 			} else {
 				to_remove.push_back(key);
 			}
@@ -1093,7 +1111,7 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 
 			if (state.node->get_heightmap().is_valid() && !mip_change) {
 				int stride = 1 << state.desired_lod;
-				int verts_per_axis = (tile_size - 1) / stride + 1;
+				int verts_per_axis = (effective_tile_px() - 1) / stride + 1;
 				int tile_verts = verts_per_axis * verts_per_axis;
 
 				state.node->set_lod_level(state.desired_lod);
@@ -1141,6 +1159,7 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 						req.paths.push_back(std::string((data_paths[i] + tname).utf8().get_data()));
 					}
 					req.tile_size = tile_size;
+					req.tile_px = effective_tile_px();
 					req.desired_lod = state.desired_lod;
 					req.distance = 0; // High priority for LOD upgrades.
 					req.ortho_paths = ortho_paths_for_tile(ei, ni, state.desired_lod);
@@ -1195,20 +1214,58 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 		if (now_ms - last_print_ms > 1000) {
 			last_print_ms = now_ms;
 			int loading = 0, no_data = 0, ready_close = 0;
+			std::vector<std::pair<int, int>> ready_coords;
+			std::vector<std::pair<int, int>> nodata_close;
 			for (auto &kv : tiles) {
 				if (kv.second.loading) loading++;
-				if (kv.second.no_data) no_data++;
+				if (kv.second.no_data) {
+					no_data++;
+					// Track no_data tiles inside the close ring (dist<=3).
+					int ei = (int)(int32_t)(kv.first >> 32);
+					int ni = (int)(int32_t)(kv.first & 0xFFFFFFFF);
+					int d = std::max(std::abs(ei - cam_ei), std::abs(ni - cam_ni));
+					if (d <= 3 && nodata_close.size() < 10) {
+						nodata_close.emplace_back(ei, ni);
+					}
+				}
 				if (kv.second.node && !kv.second.loading
 					&& kv.second.current_lod >= 0
-					&& kv.second.current_lod < LOD_DISCARD_THRESHOLD)
+					&& kv.second.current_lod < LOD_DISCARD_THRESHOLD) {
 					ready_close++;
+					if (ready_coords.size() < 12) {
+						int ei = (int)(int32_t)(kv.first >> 32);
+						int ni = (int)(int32_t)(kv.first & 0xFFFFFFFF);
+						ready_coords.emplace_back(ei, ni);
+					}
+				}
 			}
 			int elev_size = elevation_db.is_valid() ? elevation_db->get_tile_count() : -1;
-			UtilityFunctions::print("S3DTileManager: cam=(", cam_ei, ",", cam_ni,
+			UtilityFunctions::print("S3DTileManager[", (uint64_t)this, "]: cam=(", cam_ei, ",", cam_ni,
 				") tiles=", (int)tiles.size(), " loading=", loading,
 				" no_data=", no_data, " ready<LOD", (int)LOD_DISCARD_THRESHOLD,
 				"=", ready_close, " elev_db=", elev_size,
-				" workq=", (int)work_queue.size());
+				" chunks=", (int)chunks.size(),
+				" workq=", (int)work_queue.size(),
+				" data_paths=", (int)data_paths.size());
+			// Sample of which tiles are currently ready.
+			String rs;
+			for (auto &p : ready_coords) {
+				rs += " (" + itos(p.first) + "," + itos(p.second) + ")";
+			}
+			UtilityFunctions::print("    ready_tiles:", rs);
+			// Sample of close-ring no_data tiles (dist<=3 from camera).
+			if (!nodata_close.empty()) {
+				String ns;
+				for (auto &p : nodata_close) {
+					ns += " (" + itos(p.first) + "," + itos(p.second) + ")";
+				}
+				UtilityFunctions::print("    close_no_data:", ns);
+			}
+			// Echo data_paths so we can verify the project setting reached
+			// the manager.
+			for (int i = 0; i < data_paths.size(); i++) {
+				UtilityFunctions::print("    data_path[", i, "]=", data_paths[i]);
+			}
 		}
 	}
 
@@ -1275,6 +1332,7 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 				req.chunk_tile_count = chunk_size;
 				req.composite_res = CHUNK_COMPOSITE_RES;
 				req.tile_size = tile_size;
+				req.tile_px = effective_tile_px();
 				req.base_paths = base_paths_str;
 				req.distance = min_dist;
 				for (int i = 0; i < orthophoto_paths.size(); i++) {
@@ -1376,6 +1434,16 @@ void S3DTileManager::set_tile_size(int p_size)
 int S3DTileManager::get_tile_size() const
 {
 	return tile_size;
+}
+
+void S3DTileManager::set_tile_px(int p_px)
+{
+	tile_px = p_px;
+}
+
+int S3DTileManager::get_tile_px() const
+{
+	return tile_px;
 }
 
 void S3DTileManager::set_load_radius(int p_radius)
