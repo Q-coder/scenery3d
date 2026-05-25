@@ -82,6 +82,13 @@ namespace s3d
 			double conv_origin_n = 0.0;
 			bool elevation_baked = false; // true → vertex Y already carries ASL + offset
 			std::unordered_map<std::string, ManifestEntry> entries;
+			// Axis-aligned bounding box (LV95 east / north) covering all
+			// entries in this manifest. Used to suppress duplicate water
+			// polygons in overlap zones (e.g. the Bodensee is modelled by
+			// both the Swiss and Baden-Württemberg manifests).
+			double bbox_min_e = 0.0, bbox_max_e = 0.0;
+			double bbox_min_n = 0.0, bbox_max_n = 0.0;
+			bool bbox_valid = false;
 		};
 
 		std::vector<ManifestGroup> manifests;

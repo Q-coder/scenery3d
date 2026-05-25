@@ -432,6 +432,16 @@ void S3DWaterManager::load_manifests()
 			entry.center_n = kv.second.get_double("center_n");
 			entry.polygons = kv.second.get_int("polygons");
 			entry.streams = kv.second.get_int("streams");
+			if (!group.bbox_valid) {
+				group.bbox_min_e = group.bbox_max_e = entry.center_e;
+				group.bbox_min_n = group.bbox_max_n = entry.center_n;
+				group.bbox_valid = true;
+			} else {
+				if (entry.center_e < group.bbox_min_e) group.bbox_min_e = entry.center_e;
+				if (entry.center_e > group.bbox_max_e) group.bbox_max_e = entry.center_e;
+				if (entry.center_n < group.bbox_min_n) group.bbox_min_n = entry.center_n;
+				if (entry.center_n > group.bbox_max_n) group.bbox_max_n = entry.center_n;
+			}
 			group.entries[kv.first] = entry;
 		}
 
@@ -595,6 +605,37 @@ void S3DWaterManager::process_load_results()
 		state.dz = dz;
 		state.baked = result.surface;
 
+		// Detect bake bugs: some "baked" water polygons (notably interior
+		// Bodensee tiles) ship with grossly tilted Y values — e.g. a single
+		// quad whose four corners range from +5 m to +269 m, producing a
+		// dark wing floating high above the actual lake. When elevation_db
+		// is available, override the bake and re-drape such tiles using
+		// the DTM (lake surface ≈ DTM at the lake interior).
+		bool bake_suspicious = false;
+		if (elevation_baked && elevation_db.is_valid() && result.surface.vertices.size() > 0) {
+			const PackedVector3Array &vs = result.surface.vertices;
+			float ymin = vs[0].y;
+			float ymax = vs[0].y;
+			int vn = vs.size();
+			for (int i = 1; i < vn; i++) {
+				float y = vs[i].y;
+				if (y < ymin) ymin = y;
+				if (y > ymax) ymax = y;
+			}
+			// Within a single 4096 m water tile, a flat polygon (lake) or
+			// gently-sloped river should not span more than ~30 m. Anything
+			// larger indicates the baking pipeline sampled outside the
+			// water body. Threshold chosen generously to avoid touching
+			// legitimately-sloped Alpine streams.
+			if (ymax - ymin > 30.0f) {
+				bake_suspicious = true;
+				UtilityFunctions::print("S3DWaterManager: suspicious baked Y for ", result.tile_id.c_str(),
+					" span=", (double)(ymax - ymin), "m (", (double)ymin, "..", (double)ymax,
+					") — redraping from elevation_db");
+				elevation_baked = false;
+			}
+		}
+
 		Ref<ArrayMesh> mesh;
 		mesh.instantiate();
 		state.mesh = mesh;
@@ -637,6 +678,8 @@ void S3DWaterManager::process_load_results()
 		if (state.drape_pending) {
 			bool full = false;
 			if (apply_drape(state, full)) {
+				// Show on first drape (partial or full) so water is
+				// never invisible while DTM tiles stream in.
 				mi->set_visible(true);
 				if (full) {
 					state.drape_pending = false;
@@ -745,6 +788,9 @@ void S3DWaterManager::retry_pending_drapes()
 		if (!st.drape_pending || !st.loaded || st.node == nullptr) continue;
 		bool full = false;
 		if (apply_drape(st, full)) {
+			// Keep the tile visible across retries; we only stop
+			// re-committing the mesh once it's fully resolved so the
+			// vertex Y values stop drifting as new DTM data lands.
 			st.node->set_visible(true);
 			if (full) {
 				st.drape_pending = false;

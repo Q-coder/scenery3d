@@ -58,7 +58,11 @@ namespace s3d
 			uint64_t key;
 			// Candidate file paths tried in order (first existing/openable wins).
 			std::vector<std::string> paths;
+			// Meters spanned by one tile along each LV95 axis (file naming uses this).
 			int tile_size;
+			// Pixels per axis stored in the raw heightmap file. Decoupled from
+			// tile_size so a tile can cover N meters at M pixels/meter resolution.
+			int tile_px;
 			int desired_lod;
 			int distance;
 
@@ -86,7 +90,11 @@ namespace s3d
 			int ei, ni;
 			uint64_t key;
 			std::vector<uint8_t> raw_bytes;
+			// Mesh span in meters (regular: req.tile_size; chunk: csize * req.tile_size).
 			int tile_size;
+			// Heightmap image dimension in pixels (regular tile path only — chunks
+			// build a composite at composite_res pixels independently).
+			int tile_px = 0;
 			int desired_lod;
 			bool success = false;
 			bool is_chunk = false;
@@ -147,7 +155,13 @@ namespace s3d
 		std::vector<std::string> ortho_paths_for_tile(int ei, int ni, int lod) const;
 
 		// Configuration.
+		// Meters per tile axis (drives LV95 tile-index math and file naming).
 		int tile_size = 1024;
+		// Pixels per tile axis in the raw heightmap files. 0 means "same as
+		// tile_size" (legacy 1 m/px). Set explicitly when tiles store the
+		// terrain at a different pixel resolution (e.g. 2 m/px → tile_px=512
+		// for tile_size=1024).
+		int tile_px = 0;
 		int load_radius = 8;
 		int far_radius = 200;
 		int chunk_size = 8;
@@ -217,6 +231,11 @@ namespace s3d
 
 		void set_tile_size(int p_size);
 		int get_tile_size() const;
+
+		void set_tile_px(int p_px);
+		int get_tile_px() const;
+		// Effective pixel count per tile (tile_px if >0, else tile_size).
+		int effective_tile_px() const { return tile_px > 0 ? tile_px : tile_size; }
 
 		void set_load_radius(int p_radius);
 		int get_load_radius() const;
