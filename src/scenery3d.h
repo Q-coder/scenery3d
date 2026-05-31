@@ -24,7 +24,7 @@ namespace s3d
 
 	private:
 		int tile_size = 1024;
-		int tile_px = 0;
+		int tile_px = 512;
 		int load_radius = 8;
 		int far_radius = 200;
 		double origin_east = 2600000.0;
