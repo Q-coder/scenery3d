@@ -400,10 +400,14 @@ void S3DTileManager::worker_func()
 			std::vector<uint8_t> scratch;
 			for (const auto &candidate : req.paths) {
 				std::ifstream file(candidate, std::ios::binary);
-				if (!file.is_open()) continue;
+				if (!file.is_open()) {
+					continue;
+				}
 				scratch.resize(expected_size);
 				file.read(reinterpret_cast<char *>(scratch.data()), expected_size);
-				if ((size_t)file.gcount() != expected_size) continue;
+				if ((size_t)file.gcount() != expected_size) {
+					continue;
+				}
 
 				if (!result.success) {
 					result.raw_bytes = std::move(scratch);
