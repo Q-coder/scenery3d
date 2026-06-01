@@ -167,13 +167,17 @@ void Scenery3D::_ready()
 			}
 		}
 	}
-	if (!buildings_paths.is_empty()) {
-		building_manager = memnew(S3DBuildingManager);
-		add_child(building_manager);
-		building_manager->set_buildings_paths(buildings_paths);
-		building_manager->set_origin_east(origin_east);
-		building_manager->set_origin_north(origin_north);
-	}
+	// Always create the building manager (even with empty paths). The runtime
+	// scenery library (GDScript) assigns buildings_paths AFTER _ready() runs;
+	// if we only created the manager when paths were already present, those
+	// late assignments would be dropped (the property setter only forwards to
+	// an existing manager). The manager loads lazily in _process once paths
+	// are set, so creating it unconditionally is safe and cheap.
+	building_manager = memnew(S3DBuildingManager);
+	add_child(building_manager);
+	building_manager->set_origin_east(origin_east);
+	building_manager->set_origin_north(origin_north);
+	building_manager->set_buildings_paths(buildings_paths);
 
 	// Create the water manager.
 	if (water_paths.is_empty()) {
@@ -185,14 +189,13 @@ void Scenery3D::_ready()
 			}
 		}
 	}
-	if (!water_paths.is_empty()) {
-		water_manager = memnew(S3DWaterManager);
-		add_child(water_manager);
-		water_manager->set_origin_east(origin_east);
-		water_manager->set_origin_north(origin_north);
-		water_manager->set_elevation_db(elevation_db);
-		water_manager->set_water_paths(water_paths);
-	}
+	// Always create (see building_manager note above).
+	water_manager = memnew(S3DWaterManager);
+	add_child(water_manager);
+	water_manager->set_origin_east(origin_east);
+	water_manager->set_origin_north(origin_north);
+	water_manager->set_elevation_db(elevation_db);
+	water_manager->set_water_paths(water_paths);
 
 	// Create the road manager.
 	if (road_paths.is_empty()) {
@@ -204,14 +207,13 @@ void Scenery3D::_ready()
 			}
 		}
 	}
-	if (!road_paths.is_empty()) {
-		road_manager = memnew(S3DRoadManager);
-		add_child(road_manager);
-		road_manager->set_origin_east(origin_east);
-		road_manager->set_origin_north(origin_north);
-		road_manager->set_elevation_db(elevation_db);
-		road_manager->set_road_paths(road_paths);
-	}
+	// Always create (see building_manager note above).
+	road_manager = memnew(S3DRoadManager);
+	add_child(road_manager);
+	road_manager->set_origin_east(origin_east);
+	road_manager->set_origin_north(origin_north);
+	road_manager->set_elevation_db(elevation_db);
+	road_manager->set_road_paths(road_paths);
 }
 
 void Scenery3D::_process(double delta)
