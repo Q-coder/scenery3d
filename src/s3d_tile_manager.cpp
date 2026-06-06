@@ -83,19 +83,42 @@ S3DTileManager::~S3DTileManager()
 void S3DTileManager::rebuild_lod_rings()
 {
 	lod_rings.clear();
-	if (load_radius <= 5) {
-		lod_rings.push_back({load_radius, 3});
+	// The tile(s) directly under and immediately around the camera render at
+	// LOD0 (full pixel resolution) so the visible mesh is IDENTICAL to the
+	// data the S3DElevationDB samples (full-res bilinear). The aircraft is
+	// placed on, and baked roads/water sit at, the elevation DB / full-res
+	// terrain height, which node_3d.gd also feeds to JSBSim every frame as the
+	// ground plane. A coarse near mesh would diverge from that surface and make
+	// the aircraft "sink" and roads "float". Beyond the LOD0 ring the coarse
+	// tiles use block-averaged heights (see S3DTile::generate_mesh) so they
+	// still track the true surface closely; LOD grades out gently — LOD≤2
+	// (≤8 m cells) out to ~4 km and LOD3 (16 m) out to ~8 km, which is the zone
+	// where the baked road/water overlays are drawn. Only the immediate ring
+	// pays the full LOD0 vertex cost. Tiles below LOD_DISCARD_THRESHOLD (4)
+	// keep their heightmap in the elevation DB.
+	if (load_radius <= 4) {
+		lod_rings.push_back({1, 0});
+		lod_rings.push_back({2, 1});
+		lod_rings.push_back({load_radius, 2});
 	} else if (load_radius <= 15) {
-		lod_rings.push_back({3, 3});
-		lod_rings.push_back({load_radius, 4});
+		lod_rings.push_back({1, 0});
+		lod_rings.push_back({2, 1});
+		lod_rings.push_back({4, 2});
+		lod_rings.push_back({load_radius, 3});
 	} else if (load_radius <= 50) {
-		lod_rings.push_back({3, 3});
-		lod_rings.push_back({8, 4});
+		lod_rings.push_back({1, 0});
+		lod_rings.push_back({2, 1});
+		lod_rings.push_back({4, 2});
+		lod_rings.push_back({8, 3});
+		lod_rings.push_back({12, 4});
 		lod_rings.push_back({load_radius, 6});
 	} else {
-		lod_rings.push_back({3, 3});
-		lod_rings.push_back({8, 4});
-		lod_rings.push_back({25, 6});
+		lod_rings.push_back({1, 0});
+		lod_rings.push_back({2, 1});
+		lod_rings.push_back({4, 2});
+		lod_rings.push_back({8, 3});
+		lod_rings.push_back({16, 4});
+		lod_rings.push_back({30, 6});
 		lod_rings.push_back({load_radius, 8});
 	}
 }
@@ -709,6 +732,11 @@ void S3DTileManager::process_load_results(int &verts_generated)
 						mat.instantiate();
 						mat->set_texture(StandardMaterial3D::TEXTURE_ALBEDO, tex);
 						mat->set_cull_mode(StandardMaterial3D::CULL_DISABLED);
+						// Clamp to edge: with repeat enabled (the default) the
+						// mip/anisotropic sampler wraps past the [0,1] UV edge to
+						// the opposite side of the texture, bleeding the wrong
+						// pixels in as a visible seam between adjacent chunks.
+						mat->set_flag(BaseMaterial3D::FLAG_USE_TEXTURE_REPEAT, false);
 						tile->set_material(mat);
 						ortho_applied = true;
 					}
@@ -838,6 +866,10 @@ void S3DTileManager::process_load_results(int &verts_generated)
 				mat->set_texture(StandardMaterial3D::TEXTURE_ALBEDO, tex);
 				mat->set_cull_mode(StandardMaterial3D::CULL_DISABLED);
 				mat->set_texture_filter(BaseMaterial3D::TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC);
+				// Clamp to edge (disable repeat): otherwise the mip/anisotropic
+				// sampler wraps past the [0,1] UV edge to the opposite side of
+				// the tile texture, bleeding the wrong pixels in as a seam.
+				mat->set_flag(BaseMaterial3D::FLAG_USE_TEXTURE_REPEAT, false);
 				state.node->set_material(mat);
 				state.current_ortho_pixels = result.ortho_pixels;
 				ortho_decodes++;
@@ -870,6 +902,10 @@ void S3DTileManager::process_load_results(int &verts_generated)
 				// blurriness at grazing angles (common in flight views) and
 				// prevents edge-pixel bleed from showing up as tile seams.
 				mat->set_texture_filter(BaseMaterial3D::TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC);
+				// Clamp to edge — the comment above promised this but the flag
+				// was never set, so repeat (the default) wrapped edge texels in
+				// the mips and produced the visible seams between ortho tiles.
+				mat->set_flag(BaseMaterial3D::FLAG_USE_TEXTURE_REPEAT, false);
 				state.node->set_material(mat);
 				state.current_ortho_pixels = result.ortho_pixels;
 				ortho_decodes++;
@@ -1187,16 +1223,31 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 			work_queue.push_back(std::move(req));
 		}
 
-		// Drop queued requests whose tile entry has been unloaded.
+		// Drop queued requests whose tile/chunk entry has been unloaded.
+		// Chunk requests live in the `chunks` map (keyed by chunk-grid index),
+		// regular tile requests in `tiles`. The predicate MUST check the
+		// matching map: a previous version always checked `tiles`, so every
+		// queued chunk request — whose key is a chunk-grid index never present
+		// in `tiles` — was erased one frame after being queued, before any
+		// worker could process it. That silently disabled the entire far
+		// terrain panorama.
 		work_queue.erase(
 			std::remove_if(work_queue.begin(), work_queue.end(),
 				[this](const LoadRequest &req) {
+					if (req.is_chunk) {
+						return chunks.find(req.key) == chunks.end();
+					}
 					return tiles.find(req.key) == tiles.end();
 				}),
 			work_queue.end());
 
 		// Recompute distance against current camera and sort closest-first.
+		// Chunk requests keep their own distance (set from the closest tile in
+		// the chunk): their req.ei/ni are chunk-grid indices, not tile indices,
+		// so recomputing against cam_ei/ni here would assign a meaningless
+		// (huge) distance and bury them at the back of the queue forever.
 		for (auto &req : work_queue) {
+			if (req.is_chunk) continue;
 			int de = req.ei - cam_ei;
 			int dn = req.ni - cam_ni;
 			req.distance = std::max(std::abs(de), std::abs(dn));

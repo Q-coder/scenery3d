@@ -115,7 +115,7 @@ namespace s3d
 		godot::PackedStringArray water_paths;
 		double origin_east = 2600000.0;
 		double origin_north = 1200000.0;
-		int load_radius_m = 12000;
+		int load_radius_m = 8000;
 		int far_radius_m = 50000;    // Lakes/river polygons visible at distance.
 		int unload_margin_m = 2000;
 		double vertical_offset_m = 1.5;

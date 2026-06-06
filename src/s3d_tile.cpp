@@ -98,6 +98,53 @@ void S3DTile::generate_mesh()
 	real_t pixel_spacing_x = ts / static_cast<real_t>(img_w - 1);
 	real_t pixel_spacing_z = ts / static_cast<real_t>(img_h - 1);
 
+	// Fast raw access to the FORMAT_RF heightmap (one float per pixel). This is
+	// ~50× faster than Image::get_pixel() and is what makes the per-vertex
+	// block-average below cheap enough to run on the main thread.
+	PackedByteArray raw_data = heightmap->get_data();
+	const float *hf = nullptr;
+	if (heightmap->get_format() == Image::FORMAT_RF &&
+		(int64_t)raw_data.size() >= (int64_t)img_w * img_h * 4) {
+		hf = reinterpret_cast<const float *>(raw_data.ptr());
+	}
+
+	// Nearest-pixel sample (clamped) straight from the raw float buffer.
+	auto sample_raw = [&](int x, int y) -> real_t {
+		if (!hf) return sample_height(x, y, img_w, img_h);
+		x = x < 0 ? 0 : (x >= img_w ? img_w - 1 : x);
+		y = y < 0 ? 0 : (y >= img_h ? img_h - 1 : y);
+		return static_cast<real_t>(hf[(size_t)y * img_w + x]);
+	};
+
+	// Block-averaged height for a coarse-LOD vertex. Averaging a stride-sized
+	// window (instead of picking a single pixel) makes the coarse mesh track
+	// the true full-resolution surface far more closely, so baked roads/water
+	// (which sit at full-res elevation) stop floating and the aircraft (placed
+	// on the full-res elevation DB) stops sinking into humps at mid distance.
+	// CRITICAL: vertices on the tile BORDER must stay nearest-pixel so they
+	// match the identical border samples of the neighbouring tile — otherwise
+	// averaging would pull each side toward its own interior and tear a visible
+	// crack along every tile seam. Interior vertices average a centred window.
+	int half = stride / 2;
+	auto sample_height_lod = [&](int px, int py) -> real_t {
+		if (half <= 0 || px <= 0 || py <= 0 || px >= img_w - 1 || py >= img_h - 1) {
+			return sample_raw(px, py); // border or LOD0 → exact, crack-safe
+		}
+		int x0 = px - half; if (x0 < 0) x0 = 0;
+		int x1 = px + half; if (x1 > img_w - 1) x1 = img_w - 1;
+		int y0 = py - half; if (y0 < 0) y0 = 0;
+		int y1 = py + half; if (y1 > img_h - 1) y1 = img_h - 1;
+		double sum = 0.0;
+		int n = 0;
+		for (int y = y0; y <= y1; y++) {
+			for (int x = x0; x <= x1; x++) {
+				sum += hf[(size_t)y * img_w + x];
+				n++;
+			}
+		}
+		return static_cast<real_t>(sum / (double)n);
+	};
+
 	// Generate vertices, normals, and UVs.
 	for (int gz = 0; gz < verts_z; gz++) {
 		// Map gz linearly to pixel row: 0 -> 0, verts_z-1 -> img_h-1.
@@ -111,7 +158,7 @@ void S3DTile::generate_mesh()
 
 			real_t world_x = static_cast<real_t>(gx) * spacing_x;
 			real_t world_z = static_cast<real_t>(gz) * spacing_z;
-			real_t height = sample_height(px, py, img_w, img_h);
+			real_t height = sample_height_lod(px, py);
 
 			vertices[idx] = Vector3(world_x, height, world_z);
 
@@ -122,11 +169,12 @@ void S3DTile::generate_mesh()
 
 			// Compute smooth normal using central differences on the heightmap.
 			// Always sample at 1-pixel distance for high-quality normals,
-			// independent of mesh LOD.
-			real_t h_left = sample_height(px - 1, py, img_w, img_h);
-			real_t h_right = sample_height(px + 1, py, img_w, img_h);
-			real_t h_down = sample_height(px, py - 1, img_w, img_h);
-			real_t h_up = sample_height(px, py + 1, img_w, img_h);
+			// independent of mesh LOD — this keeps crisp surface shading even
+			// where the geometry itself is averaged/coarse.
+			real_t h_left = sample_raw(px - 1, py);
+			real_t h_right = sample_raw(px + 1, py);
+			real_t h_down = sample_raw(px, py - 1);
+			real_t h_up = sample_raw(px, py + 1);
 
 			// The distance in world units between the two samples (2 pixels).
 			real_t dx = pixel_spacing_x * 2.0;
