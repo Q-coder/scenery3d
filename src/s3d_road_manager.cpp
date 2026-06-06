@@ -620,10 +620,21 @@ void S3DRoadManager::process_load_results()
 		// material — actually it IS set above, so they neither cast nor
 		// receive, which is what we want for thin overlay geometry.
 		mi->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_OFF);
-		// When elevation is baked vertex Y is already ASL+offset; always
-		// place the root at y=0.  For un-baked tiles keep the legacy
-		// behaviour: y=vertical_offset_m when no elevation_db is set.
-		float root_y = (elevation_baked || elevation_db.is_valid()) ? 0.0f : (float)vertical_offset_m;
+		// Place the tile root:
+		//   - Baked tiles carry a uniform anti-z-fight lift (~0.4 m) in their
+		//     vertex Y. Drop the root by baked_drop_m so roads hug the ground
+		//     instead of floating a visible step above it at taxi height.
+		//   - Non-baked tiles with an elevation_db are draped per-vertex
+		//     (root stays at 0).
+		//   - Non-baked tiles without a DB fall back to a flat vertical_offset.
+		float root_y;
+		if (elevation_baked) {
+			root_y = -(float)baked_drop_m;
+		} else if (elevation_db.is_valid()) {
+			root_y = 0.0f;
+		} else {
+			root_y = (float)vertical_offset_m;
+		}
 		mi->set_position(Vector3((float)dx, root_y, (float)dz));
 		add_child(mi);
 
@@ -806,6 +817,10 @@ void S3DRoadManager::_bind_methods()
 	ClassDB::bind_method(D_METHOD("set_vertical_offset_m", "offset"), &S3DRoadManager::set_vertical_offset_m);
 	ClassDB::bind_method(D_METHOD("get_vertical_offset_m"), &S3DRoadManager::get_vertical_offset_m);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "vertical_offset_m"), "set_vertical_offset_m", "get_vertical_offset_m");
+
+	ClassDB::bind_method(D_METHOD("set_baked_drop_m", "drop"), &S3DRoadManager::set_baked_drop_m);
+	ClassDB::bind_method(D_METHOD("get_baked_drop_m"), &S3DRoadManager::get_baked_drop_m);
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "baked_drop_m"), "set_baked_drop_m", "get_baked_drop_m");
 }
 
 // ── Getters / Setters ───────────────────────────────────────────────────────
@@ -855,5 +870,24 @@ void S3DRoadManager::set_vertical_offset_m(double p_offset)
 	}
 }
 double S3DRoadManager::get_vertical_offset_m() const { return vertical_offset_m; }
+
+void S3DRoadManager::set_baked_drop_m(double p_drop)
+{
+	baked_drop_m = p_drop;
+	// Re-apply to already-loaded baked tiles. Baked tiles sit at a negative
+	// root Y (= -baked_drop_m); draped tiles keep root 0 and per-vertex Y, so
+	// only nudge tiles whose root is at/below zero to avoid disturbing the
+	// flat-offset fallback tiles.
+	for (auto &kv : tiles) {
+		if (kv.second.node) {
+			Vector3 pos = kv.second.node->get_position();
+			if (pos.y <= 0.0f) {
+				pos.y = -(float)baked_drop_m;
+				kv.second.node->set_position(pos);
+			}
+		}
+	}
+}
+double S3DRoadManager::get_baked_drop_m() const { return baked_drop_m; }
 
 } // namespace s3d

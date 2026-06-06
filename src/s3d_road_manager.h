@@ -107,9 +107,28 @@ namespace s3d
 		godot::PackedStringArray road_paths;
 		double origin_east = 2600000.0;
 		double origin_north = 1200000.0;
-		int load_radius_m = 12000;
+		// Roads are baked at full-resolution terrain height. Beyond ~8 km the
+		// visible terrain mesh drops to coarse LOD and dips below the baked
+		// road Y, so the roads visibly float (a grey band at the horizon).
+		// Cap the draw radius to the zone where the terrain mesh is still fine
+		// enough (LOD ≤ 3) that baked roads stay flush.
+		int load_radius_m = 8000;
 		int unload_margin_m = 2000;
 		double vertical_offset_m = 0.4;
+
+		// swissTLM3D / OSM roads are baked with a small uniform anti-z-fight
+		// lift ABOVE the bare-earth DTM. Measured near Schmerlat the lift is
+		// very uniform: median +0.42 m, p5 +0.30, p90 +0.50 (bilinear DTM).
+		// At a low taxi camera that lift reads as the aircraft driving *under*
+		// the road. Drop baked road tiles by this much at render time so the
+		// bulk of the road sits ~0.10 m above the ground (median +0.42 − 0.32):
+		// tight enough to look flush, while only ~7 % of vertices dip ≤2 cm
+		// below (road stays a continuous ribbon, no dashed gaps). Godot's
+		// double-precision reverse-Z depth keeps the residual ~0.10 m clear of
+		// z-fighting. Applied to the tile root, so bridges/embankments (baked
+		// metres higher) keep their relative height. Tune higher (e.g. 0.35)
+		// to hug even tighter at the cost of more lower-tail sink-through.
+		double baked_drop_m = 0.32;
 
 		// Optional elevation DB: when set, road vertices are re-draped onto
 		// the terrain heightmap at load time to remove DTM-mismatch gaps
@@ -169,6 +188,9 @@ namespace s3d
 
 		void set_vertical_offset_m(double p_offset);
 		double get_vertical_offset_m() const;
+
+		void set_baked_drop_m(double p_drop);
+		double get_baked_drop_m() const;
 
 		void set_elevation_db(const godot::Ref<S3DElevationDB> &p_db) { elevation_db = p_db; }
 

@@ -333,6 +333,15 @@ String Scenery3D::get_buildings_path() const
 void Scenery3D::set_buildings_paths(const PackedStringArray &p_paths)
 {
 	buildings_paths = p_paths;
+	// Lazily create the manager if paths arrive after _ready (e.g. the runtime
+	// scenery-library flow assigns paths once areas are enabled). Without this,
+	// a node that started with empty paths would never render buildings.
+	if (!building_manager && !p_paths.is_empty() && is_inside_tree()) {
+		building_manager = memnew(S3DBuildingManager);
+		add_child(building_manager);
+		building_manager->set_origin_east(origin_east);
+		building_manager->set_origin_north(origin_north);
+	}
 	if (building_manager) {
 		building_manager->set_buildings_paths(p_paths);
 	}
@@ -346,6 +355,16 @@ PackedStringArray Scenery3D::get_buildings_paths() const
 void Scenery3D::set_water_paths(const PackedStringArray &p_paths)
 {
 	water_paths = p_paths;
+	// Lazily create the manager if paths arrive after _ready (e.g. the runtime
+	// scenery-library flow assigns paths once areas are enabled). Without this,
+	// a node that started with empty paths would never render water.
+	if (!water_manager && !p_paths.is_empty() && is_inside_tree()) {
+		water_manager = memnew(S3DWaterManager);
+		add_child(water_manager);
+		water_manager->set_origin_east(origin_east);
+		water_manager->set_origin_north(origin_north);
+		water_manager->set_elevation_db(elevation_db);
+	}
 	if (water_manager) {
 		water_manager->set_water_paths(p_paths);
 	}
@@ -359,6 +378,16 @@ PackedStringArray Scenery3D::get_water_paths() const
 void Scenery3D::set_road_paths(const PackedStringArray &p_paths)
 {
 	road_paths = p_paths;
+	// Lazily create the manager if paths arrive after _ready (e.g. the runtime
+	// scenery-library flow assigns paths once areas are enabled). Without this,
+	// a node that started with empty paths would never render roads.
+	if (!road_manager && !p_paths.is_empty() && is_inside_tree()) {
+		road_manager = memnew(S3DRoadManager);
+		add_child(road_manager);
+		road_manager->set_origin_east(origin_east);
+		road_manager->set_origin_north(origin_north);
+		road_manager->set_elevation_db(elevation_db);
+	}
 	if (road_manager) {
 		road_manager->set_road_paths(p_paths);
 	}

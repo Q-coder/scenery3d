@@ -612,26 +612,37 @@ void S3DWaterManager::process_load_results()
 		// is available, override the bake and re-drape such tiles using
 		// the DTM (lake surface ≈ DTM at the lake interior).
 		bool bake_suspicious = false;
-		if (elevation_baked && elevation_db.is_valid() && result.surface.vertices.size() > 0) {
+		if (elevation_baked && elevation_db.is_valid() && result.surface.indices.size() >= 3) {
 			const PackedVector3Array &vs = result.surface.vertices;
-			float ymin = vs[0].y;
-			float ymax = vs[0].y;
+			const PackedInt32Array &ix = result.surface.indices;
+			// Detect the "dark wing" bake bug by the LOCAL vertical span of an
+			// individual triangle — NOT the whole-tile span. A genuinely buggy
+			// quad has corners ranging e.g. +5..+269 m within one triangle,
+			// whereas a legitimately-sloped Alpine river crossing a 4096 m
+			// tile descends through many SMALL triangles whose total span is
+			// large but whose per-triangle span stays tiny. Using whole-tile
+			// span here previously mis-flagged correctly-baked rivers/lakes
+			// and forced a redrape (the "float then snap into place" the user
+			// reported). Per-triangle keeps the wing safety net without
+			// touching valid sloped water.
+			float worst = 0.0f;
 			int vn = vs.size();
-			for (int i = 1; i < vn; i++) {
-				float y = vs[i].y;
-				if (y < ymin) ymin = y;
-				if (y > ymax) ymax = y;
+			for (int i = 0; i + 2 < ix.size(); i += 3) {
+				int a = ix[i], b = ix[i + 1], c = ix[i + 2];
+				if (a < 0 || b < 0 || c < 0 || a >= vn || b >= vn || c >= vn) continue;
+				float ya = vs[a].y, yb = vs[b].y, yc = vs[c].y;
+				float lo = ya < yb ? (ya < yc ? ya : yc) : (yb < yc ? yb : yc);
+				float hi = ya > yb ? (ya > yc ? ya : yc) : (yb > yc ? yb : yc);
+				float span = hi - lo;
+				if (span > worst) worst = span;
 			}
-			// Within a single 4096 m water tile, a flat polygon (lake) or
-			// gently-sloped river should not span more than ~30 m. Anything
-			// larger indicates the baking pipeline sampled outside the
-			// water body. Threshold chosen generously to avoid touching
-			// legitimately-sloped Alpine streams.
-			if (ymax - ymin > 30.0f) {
+			// A single water triangle should never span more than a few tens
+			// of metres vertically; 50 m is generous for steep streams.
+			if (worst > 50.0f) {
 				bake_suspicious = true;
 				UtilityFunctions::print("S3DWaterManager: suspicious baked Y for ", result.tile_id.c_str(),
-					" span=", (double)(ymax - ymin), "m (", (double)ymin, "..", (double)ymax,
-					") — redraping from elevation_db");
+					" worst-triangle span=", (double)worst,
+					"m — redraping from elevation_db");
 				elevation_baked = false;
 			}
 		}
