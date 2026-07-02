@@ -49,17 +49,35 @@ def tile_name(e_km: int, n_km: int) -> str:
     return f"LoD2_32_{e_km}_{n_km}_2_bw"
 
 
-def http_head(url: str, timeout: float = 15.0) -> tuple[int, int]:
+def http_head(url: str, timeout: float = 15.0, retries: int = 4) -> tuple[int, int]:
+    # IMPORTANT: a transient failure (timeout / connection reset / rate-limit
+    # drop) must NOT be confused with "tile absent". The probe caller keeps
+    # only status==200, so returning 0 on a blip silently drops a tile that
+    # actually exists on the server -> patchy N-S holes in the converted
+    # buildings. Retry transient errors (and 429/5xx) with exponential
+    # backoff; only a definite 404 (or exhausted retries) means "absent".
     req = urllib.request.Request(url, method="HEAD",
                                  headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            length = int(resp.headers.get("Content-Length", "0") or 0)
-            return resp.status, length
-    except urllib.error.HTTPError as e:
-        return e.code, 0
-    except (urllib.error.URLError, TimeoutError, OSError):
-        return 0, 0
+    backoff = 0.5
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                length = int(resp.headers.get("Content-Length", "0") or 0)
+                return resp.status, length
+        except urllib.error.HTTPError as e:
+            # Definite server answer. Retry transient server-side codes
+            # (rate-limit / gateway), but treat 404 etc. as authoritative.
+            if e.code in (429, 500, 502, 503, 504) and attempt < retries:
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            return e.code, 0
+        except (urllib.error.URLError, TimeoutError, OSError):
+            if attempt < retries:
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            return 0, 0
 
 
 def http_download(url: str, dest: Path, expected_size: int = 0,

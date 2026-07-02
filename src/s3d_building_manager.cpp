@@ -607,13 +607,29 @@ void S3DBuildingManager::update_buildings(Vector3 camera_pos)
 						state.has_detail = false;
 					}
 
-					// Show/hide far LOD.
-					if (state.far_lod_node) {
-						state.far_lod_node->set_visible(desired_lod >= 1);
+					// Approaching a tile that was first loaded as far-LOD only
+					// (no detailed meshes) — re-request a load so process_load_results
+					// can build the detailed root_node now that we are close. Without
+					// this, the far mesh gets hidden below but there is no detail to
+					// show, so the buildings silently vanish as you fly up to them.
+					if (desired_lod == 0 && !state.has_detail && !state.loading) {
+						state.loading = true;
+						LoadRequest req;
+						req.tile_id = tid;
+						req.path = entry.dir + "/" + entry.file;
+						req.distance = (int)dist;
+						new_requests.push_back(std::move(req));
 					}
-					// Show/hide detail.
+
+					// Far LOD is visible whenever we are NOT showing detail — this
+					// includes the near case while the detailed geometry is still
+					// streaming in, so a tile never renders as nothing.
+					if (state.far_lod_node) {
+						state.far_lod_node->set_visible(desired_lod >= 1 || !state.has_detail);
+					}
+					// Detail is shown only when close AND actually loaded.
 					if (state.root_node) {
-						state.root_node->set_visible(desired_lod == 0);
+						state.root_node->set_visible(desired_lod == 0 && state.has_detail);
 					}
 					state.lod = desired_lod;
 				}
@@ -667,8 +683,10 @@ void S3DBuildingManager::update_buildings(Vector3 camera_pos)
 
 void S3DBuildingManager::process_load_results()
 {
-	// Process at most a few results per frame.
-	for (int budget = 0; budget < 2; budget++) {
+	// Process a few results per frame (raised from 2 so detailed buildings
+	// near the aircraft appear quickly after a teleport / intro rather than
+	// trickling in over many seconds).
+	for (int budget = 0; budget < 6; budget++) {
 		LoadResult result;
 		{
 			std::lock_guard<std::mutex> lock(results_mutex);
