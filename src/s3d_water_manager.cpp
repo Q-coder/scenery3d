@@ -4,6 +4,7 @@
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/classes/camera3d.hpp>
 #include <godot_cpp/classes/mesh.hpp>
+#include <godot_cpp/classes/material.hpp>
 #include <godot_cpp/classes/geometry_instance3d.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
@@ -25,6 +26,79 @@ S3DWaterManager::S3DWaterManager()
 	water_material->set_cull_mode(StandardMaterial3D::CULL_DISABLED);
 	water_material->set_flag(BaseMaterial3D::FLAG_DONT_RECEIVE_SHADOWS, true);
 	water_material->set_diffuse_mode(StandardMaterial3D::DIFFUSE_LAMBERT_WRAP);
+	build_depth_material();
+}
+
+// Shades the water surface by the distance between it and the terrain behind
+// it, read from the opaque depth buffer. With a swissBATHY3D lake bed under the
+// surface that turns a flat blue plate into a real depth map: turquoise and
+// see-through in the shallows, deep blue and opaque over the basin.
+//
+// Reading the depth buffer rather than sampling the heightmap means this needs
+// no elevation lookups, works for rivers and puddles too, and automatically
+// hides the orthophoto in deep water — the aerial image under a lake is a photo
+// of the *surface*, so it only looks right where the water really is shallow.
+void S3DWaterManager::build_depth_material()
+{
+	Ref<Shader> shader;
+	shader.instantiate();
+	shader->set_code(String(R"(
+shader_type spatial;
+render_mode blend_mix, cull_disabled, shadows_disabled, diffuse_lambert_wrap, specular_schlick_ggx;
+
+uniform sampler2D depth_tex : hint_depth_texture, filter_nearest;
+uniform vec3 shallow_color : source_color = vec3(0.30, 0.56, 0.60);
+uniform vec3 deep_color : source_color = vec3(0.02, 0.09, 0.17);
+uniform float opaque_depth_m = 16.0;
+uniform float shore_alpha = 0.35;
+uniform float deep_alpha = 0.97;
+
+void fragment() {
+	float raw = texture(depth_tex, SCREEN_UV).x;
+	vec4 view = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, raw, 1.0);
+	view.xyz /= view.w;
+	// Both distances are along the view ray, so their difference is the water
+	// column thickness as seen by the camera - deliberately so: looking at a
+	// lake from a shallow angle correctly reads as deeper.
+	float water = max(-view.z - (-VERTEX.z), 0.0);
+	float t = clamp(water / max(opaque_depth_m, 0.01), 0.0, 1.0);
+	t = t * t * (3.0 - 2.0 * t);
+	ALBEDO = mix(shallow_color, deep_color, t);
+	ALPHA = mix(shore_alpha, deep_alpha, t);
+	ROUGHNESS = 0.06;
+	METALLIC = 0.0;
+	SPECULAR = 0.5;
+}
+)"));
+	depth_material.instantiate();
+	depth_material->set_shader(shader);
+	push_depth_uniforms();
+}
+
+void S3DWaterManager::push_depth_uniforms()
+{
+	if (depth_material.is_null()) return;
+	depth_material->set_shader_parameter("shallow_color", shallow_color);
+	depth_material->set_shader_parameter("deep_color", deep_color);
+	depth_material->set_shader_parameter("opaque_depth_m", opaque_depth_m);
+	depth_material->set_shader_parameter("shore_alpha", shore_alpha);
+	depth_material->set_shader_parameter("deep_alpha", deep_alpha);
+}
+
+Ref<Material> S3DWaterManager::surface_material() const
+{
+	if (depth_shading && depth_material.is_valid()) return depth_material;
+	return water_material;
+}
+
+void S3DWaterManager::reapply_material()
+{
+	Ref<Material> mat = surface_material();
+	for (auto &kv : tiles) {
+		if (kv.second.mesh.is_valid() && kv.second.mesh->get_surface_count() > 0) {
+			kv.second.mesh->surface_set_material(0, mat);
+		}
+	}
 }
 
 S3DWaterManager::~S3DWaterManager()
@@ -449,9 +523,34 @@ void S3DWaterManager::load_manifests()
 		manifests.push_back(std::move(group));
 	}
 
+	// Suppress duplicate coverage. Water tiles from every source share one
+	// absolute 4096 m LV95 grid, so the same tile_id in two manifests means
+	// the same patch of ground is modelled twice — e.g. the Bodensee is a
+	// complete lake polygon in BOTH swissTLM3D and the Baden-Württemberg OSM
+	// set, and the two coincident surfaces z-fight into a patchwork of
+	// flickering triangles. Earlier paths are higher priority (they come from
+	// the Scenery Library order), so a later manifest drops any tile an
+	// earlier one already covers.
+	int suppressed = 0;
+	if (dedup_overlapping_tiles && manifests.size() > 1) {
+		std::unordered_set<std::string> claimed;
+		for (auto &group : manifests) {
+			for (auto it = group.entries.begin(); it != group.entries.end();) {
+				if (claimed.find(it->first) != claimed.end()) {
+					it = group.entries.erase(it);
+					suppressed++;
+				} else {
+					++it;
+				}
+			}
+			for (auto &kv : group.entries) claimed.insert(kv.first);
+		}
+	}
+
 	UtilityFunctions::print("S3DWaterManager: loaded ",
 	                        (int64_t)manifests.size(), " manifest(s), ",
-	                        (int64_t)total, " water tiles");
+	                        (int64_t)(total - suppressed), " water tiles (",
+	                        (int64_t)suppressed, " duplicates suppressed)");
 }
 
 // ── Update ──────────────────────────────────────────────────────────────────
@@ -605,28 +704,26 @@ void S3DWaterManager::process_load_results()
 		state.dz = dz;
 		state.baked = result.surface;
 
-		// Detect bake bugs: some "baked" water polygons (notably interior
-		// Bodensee tiles) ship with grossly tilted Y values — e.g. a single
-		// quad whose four corners range from +5 m to +269 m, producing a
-		// dark wing floating high above the actual lake. When elevation_db
-		// is available, override the bake and re-drape such tiles using
-		// the DTM (lake surface ≈ DTM at the lake interior).
-		bool bake_suspicious = false;
-		if (elevation_baked && elevation_db.is_valid() && result.surface.indices.size() >= 3) {
+		// Detect bake bugs: some "baked" water polygons ship with grossly
+		// tilted Y values — e.g. a single quad whose four corners range from
+		// +5 m to +269 m, producing a dark wing floating high above the
+		// actual lake.
+		//
+		// This used to distrust the whole tile and redrape it from the DTM,
+		// which worked only as long as swissALTI3D modelled every lake as a
+		// flat plate at its water level. With a swissBATHY3D overlay the DTM
+		// under a lake IS the lake bed, so redraping drops the surface up to
+		// 250 m and opens a hole in the lake. Instead, discard just the
+		// offending triangles: the surrounding baked geometry is correct and
+		// a wing is by definition an isolated defect.
+		if (elevation_baked && result.surface.indices.size() >= 3
+		    && max_triangle_span_m > 0.0) {
 			const PackedVector3Array &vs = result.surface.vertices;
 			const PackedInt32Array &ix = result.surface.indices;
-			// Detect the "dark wing" bake bug by the LOCAL vertical span of an
-			// individual triangle — NOT the whole-tile span. A genuinely buggy
-			// quad has corners ranging e.g. +5..+269 m within one triangle,
-			// whereas a legitimately-sloped Alpine river crossing a 4096 m
-			// tile descends through many SMALL triangles whose total span is
-			// large but whose per-triangle span stays tiny. Using whole-tile
-			// span here previously mis-flagged correctly-baked rivers/lakes
-			// and forced a redrape (the "float then snap into place" the user
-			// reported). Per-triangle keeps the wing safety net without
-			// touching valid sloped water.
-			float worst = 0.0f;
 			int vn = vs.size();
+			PackedInt32Array kept;
+			int dropped = 0;
+			float worst = 0.0f;
 			for (int i = 0; i + 2 < ix.size(); i += 3) {
 				int a = ix[i], b = ix[i + 1], c = ix[i + 2];
 				if (a < 0 || b < 0 || c < 0 || a >= vn || b >= vn || c >= vn) continue;
@@ -634,16 +731,26 @@ void S3DWaterManager::process_load_results()
 				float lo = ya < yb ? (ya < yc ? ya : yc) : (yb < yc ? yb : yc);
 				float hi = ya > yb ? (ya > yc ? ya : yc) : (yb > yc ? yb : yc);
 				float span = hi - lo;
-				if (span > worst) worst = span;
+				if (span > (float)max_triangle_span_m) {
+					if (span > worst) worst = span;
+					dropped++;
+					continue;
+				}
+				kept.push_back(a);
+				kept.push_back(b);
+				kept.push_back(c);
 			}
-			// A single water triangle should never span more than a few tens
-			// of metres vertically; 50 m is generous for steep streams.
-			if (worst > 50.0f) {
-				bake_suspicious = true;
-				UtilityFunctions::print("S3DWaterManager: suspicious baked Y for ", result.tile_id.c_str(),
-					" worst-triangle span=", (double)worst,
-					"m — redraping from elevation_db");
-				elevation_baked = false;
+			if (dropped > 0) {
+				UtilityFunctions::print("S3DWaterManager: dropped ", (int64_t)dropped,
+					" over-tilted triangle(s) from ", result.tile_id.c_str(),
+					" (worst span=", (double)worst, "m)");
+				result.surface.indices = kept;
+				state.baked.indices = kept;
+			}
+			if (result.surface.indices.size() < 3) {
+				state.no_data = true;
+				state.loaded = true;
+				continue;
 			}
 		}
 
@@ -662,7 +769,7 @@ void S3DWaterManager::process_load_results()
 		}
 		arrays[Mesh::ARRAY_INDEX] = result.surface.indices;
 		mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
-		mesh->surface_set_material(0, water_material);
+		mesh->surface_set_material(0, surface_material());
 
 		MeshInstance3D *mi = memnew(MeshInstance3D);
 		mi->set_name(String("water_") + String(result.tile_id.c_str()));
@@ -757,7 +864,7 @@ bool S3DWaterManager::apply_drape(TileState &state, bool &out_fully_resolved)
 			arrays[Mesh::ARRAY_INDEX] = state.baked.indices;
 			state.mesh->clear_surfaces();
 			state.mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
-			state.mesh->surface_set_material(0, water_material);
+			state.mesh->surface_set_material(0, surface_material());
 			out_fully_resolved = false;
 			return true;
 		}
@@ -780,7 +887,7 @@ bool S3DWaterManager::apply_drape(TileState &state, bool &out_fully_resolved)
 	arrays[Mesh::ARRAY_INDEX] = state.baked.indices;
 	state.mesh->clear_surfaces();
 	state.mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
-	state.mesh->surface_set_material(0, water_material);
+	state.mesh->surface_set_material(0, surface_material());
 	out_fully_resolved = (n_resolved == vn);
 	return true;
 }
@@ -844,6 +951,38 @@ void S3DWaterManager::_bind_methods()
 	ClassDB::bind_method(D_METHOD("set_vertical_offset_m", "offset"), &S3DWaterManager::set_vertical_offset_m);
 	ClassDB::bind_method(D_METHOD("get_vertical_offset_m"), &S3DWaterManager::get_vertical_offset_m);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "vertical_offset_m"), "set_vertical_offset_m", "get_vertical_offset_m");
+
+	ClassDB::bind_method(D_METHOD("set_dedup_overlapping_tiles", "enabled"), &S3DWaterManager::set_dedup_overlapping_tiles);
+	ClassDB::bind_method(D_METHOD("get_dedup_overlapping_tiles"), &S3DWaterManager::get_dedup_overlapping_tiles);
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "dedup_overlapping_tiles"), "set_dedup_overlapping_tiles", "get_dedup_overlapping_tiles");
+
+	ClassDB::bind_method(D_METHOD("set_max_triangle_span_m", "span"), &S3DWaterManager::set_max_triangle_span_m);
+	ClassDB::bind_method(D_METHOD("get_max_triangle_span_m"), &S3DWaterManager::get_max_triangle_span_m);
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "max_triangle_span_m"), "set_max_triangle_span_m", "get_max_triangle_span_m");
+
+	ClassDB::bind_method(D_METHOD("set_depth_shading", "enabled"), &S3DWaterManager::set_depth_shading);
+	ClassDB::bind_method(D_METHOD("get_depth_shading"), &S3DWaterManager::get_depth_shading);
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "depth_shading"), "set_depth_shading", "get_depth_shading");
+
+	ClassDB::bind_method(D_METHOD("set_shallow_color", "color"), &S3DWaterManager::set_shallow_color);
+	ClassDB::bind_method(D_METHOD("get_shallow_color"), &S3DWaterManager::get_shallow_color);
+	ADD_PROPERTY(PropertyInfo(Variant::COLOR, "shallow_color"), "set_shallow_color", "get_shallow_color");
+
+	ClassDB::bind_method(D_METHOD("set_deep_color", "color"), &S3DWaterManager::set_deep_color);
+	ClassDB::bind_method(D_METHOD("get_deep_color"), &S3DWaterManager::get_deep_color);
+	ADD_PROPERTY(PropertyInfo(Variant::COLOR, "deep_color"), "set_deep_color", "get_deep_color");
+
+	ClassDB::bind_method(D_METHOD("set_opaque_depth_m", "depth"), &S3DWaterManager::set_opaque_depth_m);
+	ClassDB::bind_method(D_METHOD("get_opaque_depth_m"), &S3DWaterManager::get_opaque_depth_m);
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "opaque_depth_m"), "set_opaque_depth_m", "get_opaque_depth_m");
+
+	ClassDB::bind_method(D_METHOD("set_shore_alpha", "alpha"), &S3DWaterManager::set_shore_alpha);
+	ClassDB::bind_method(D_METHOD("get_shore_alpha"), &S3DWaterManager::get_shore_alpha);
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "shore_alpha"), "set_shore_alpha", "get_shore_alpha");
+
+	ClassDB::bind_method(D_METHOD("set_deep_alpha", "alpha"), &S3DWaterManager::set_deep_alpha);
+	ClassDB::bind_method(D_METHOD("get_deep_alpha"), &S3DWaterManager::get_deep_alpha);
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "deep_alpha"), "set_deep_alpha", "get_deep_alpha");
 }
 
 // ── Getters / Setters ───────────────────────────────────────────────────────
@@ -896,5 +1035,39 @@ void S3DWaterManager::set_vertical_offset_m(double p_offset)
 	}
 }
 double S3DWaterManager::get_vertical_offset_m() const { return vertical_offset_m; }
+
+void S3DWaterManager::set_dedup_overlapping_tiles(bool p_enabled)
+{
+	if (dedup_overlapping_tiles == p_enabled) return;
+	dedup_overlapping_tiles = p_enabled;
+	manifest_loaded = false;
+}
+bool S3DWaterManager::get_dedup_overlapping_tiles() const { return dedup_overlapping_tiles; }
+
+void S3DWaterManager::set_max_triangle_span_m(double p_span) { max_triangle_span_m = p_span; }
+double S3DWaterManager::get_max_triangle_span_m() const { return max_triangle_span_m; }
+
+void S3DWaterManager::set_depth_shading(bool p_enabled)
+{
+	if (depth_shading == p_enabled) return;
+	depth_shading = p_enabled;
+	reapply_material();
+}
+bool S3DWaterManager::get_depth_shading() const { return depth_shading; }
+
+void S3DWaterManager::set_shallow_color(const Color &p_color) { shallow_color = p_color; push_depth_uniforms(); }
+Color S3DWaterManager::get_shallow_color() const { return shallow_color; }
+
+void S3DWaterManager::set_deep_color(const Color &p_color) { deep_color = p_color; push_depth_uniforms(); }
+Color S3DWaterManager::get_deep_color() const { return deep_color; }
+
+void S3DWaterManager::set_opaque_depth_m(double p_depth) { opaque_depth_m = p_depth; push_depth_uniforms(); }
+double S3DWaterManager::get_opaque_depth_m() const { return opaque_depth_m; }
+
+void S3DWaterManager::set_shore_alpha(double p_alpha) { shore_alpha = p_alpha; push_depth_uniforms(); }
+double S3DWaterManager::get_shore_alpha() const { return shore_alpha; }
+
+void S3DWaterManager::set_deep_alpha(double p_alpha) { deep_alpha = p_alpha; push_depth_uniforms(); }
+double S3DWaterManager::get_deep_alpha() const { return deep_alpha; }
 
 } // namespace s3d

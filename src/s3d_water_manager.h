@@ -5,6 +5,8 @@
 #include <godot_cpp/classes/mesh_instance3d.hpp>
 #include <godot_cpp/classes/array_mesh.hpp>
 #include <godot_cpp/classes/standard_material3d.hpp>
+#include <godot_cpp/classes/shader.hpp>
+#include <godot_cpp/classes/shader_material.hpp>
 #include <godot_cpp/classes/ref.hpp>
 
 #include "s3d_elevation_db.h"
@@ -107,8 +109,12 @@ namespace s3d
 		std::deque<LoadResult> results_queue;
 		std::atomic<bool> worker_running{false};
 
-		// Shared material.
+		// Shared materials. `water_material` is the flat vertex-colour
+		// fallback; `depth_material` shades the surface by how deep the
+		// terrain behind it lies, which is what makes a bathymetry model
+		// visible from the air.
 		godot::Ref<godot::StandardMaterial3D> water_material;
+		godot::Ref<godot::ShaderMaterial> depth_material;
 
 		// Configuration.
 		godot::String water_path;
@@ -119,6 +125,16 @@ namespace s3d
 		int far_radius_m = 50000;    // Lakes/river polygons visible at distance.
 		int unload_margin_m = 2000;
 		double vertical_offset_m = 1.5;
+		// Same patch of ground modelled by two sources ⇒ keep the first only.
+		bool dedup_overlapping_tiles = true;
+		// Baked triangles taller than this are bake bugs and get discarded.
+		double max_triangle_span_m = 50.0;
+		bool depth_shading = true;
+		godot::Color shallow_color = godot::Color(0.30f, 0.56f, 0.60f);
+		godot::Color deep_color = godot::Color(0.02f, 0.09f, 0.17f);
+		double opaque_depth_m = 16.0;
+		double shore_alpha = 0.35;
+		double deep_alpha = 0.97;
 
 		// Optional elevation DB: when set, water vertices are draped onto
 		// the terrain heightmap. Without it water sits flat at
@@ -143,6 +159,11 @@ namespace s3d
 		void process_load_results();
 		bool apply_drape(TileState &state, bool &out_fully_resolved);
 		void retry_pending_drapes();
+
+		void build_depth_material();
+		void push_depth_uniforms();
+		godot::Ref<godot::Material> surface_material() const;
+		void reapply_material();
 
 		static bool parse_glb(const std::vector<uint8_t> &data, SurfaceData &out);
 
@@ -175,6 +196,30 @@ namespace s3d
 
 		void set_vertical_offset_m(double p_offset);
 		double get_vertical_offset_m() const;
+
+		void set_dedup_overlapping_tiles(bool p_enabled);
+		bool get_dedup_overlapping_tiles() const;
+
+		void set_max_triangle_span_m(double p_span);
+		double get_max_triangle_span_m() const;
+
+		void set_depth_shading(bool p_enabled);
+		bool get_depth_shading() const;
+
+		void set_shallow_color(const godot::Color &p_color);
+		godot::Color get_shallow_color() const;
+
+		void set_deep_color(const godot::Color &p_color);
+		godot::Color get_deep_color() const;
+
+		void set_opaque_depth_m(double p_depth);
+		double get_opaque_depth_m() const;
+
+		void set_shore_alpha(double p_alpha);
+		double get_shore_alpha() const;
+
+		void set_deep_alpha(double p_alpha);
+		double get_deep_alpha() const;
 
 		void set_elevation_db(const godot::Ref<S3DElevationDB> &p_db) { elevation_db = p_db; }
 
