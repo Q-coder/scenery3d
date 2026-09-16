@@ -58,6 +58,10 @@ namespace s3d
 			uint64_t key;
 			// Candidate file paths tried in order (first existing/openable wins).
 			std::vector<std::string> paths;
+			// Pixels-per-tile override per candidate path, parallel to `paths`
+			// (0 = use tile_px). Filled from each data path's manifest.json so
+			// mixed-resolution regions coexist in one manager instance.
+			std::vector<int> path_px;
 			// Meters spanned by one tile along each LV95 axis (file naming uses this).
 			int tile_size;
 			// Pixels per axis stored in the raw heightmap file. Decoupled from
@@ -80,6 +84,9 @@ namespace s3d
 			int composite_res = 0;
 			// Candidate base directories for chunk tile lookup.
 			std::vector<std::string> base_paths;
+			// Pixels-per-tile override per base directory, parallel to
+			// base_paths (0 = use tile_px). See LoadRequest::path_px.
+			std::vector<int> base_path_px;
 			// Orthophoto mip directories for chunk compositing
 			// (one per orthophoto root; first existing JPEG per sub-tile wins).
 			std::vector<std::string> ortho_mip_dirs;
@@ -154,6 +161,15 @@ namespace s3d
 		// for a given tile + LOD. Worker tries them in order.
 		std::vector<std::string> ortho_paths_for_tile(int ei, int ni, int lod) const;
 
+		// pixels_per_tile declared by <dir>/manifest.json, or 0 if the
+		// manifest is missing / has no such field (→ node-wide tile_px).
+		static int manifest_pixels_per_tile(const std::string &p_dir);
+		// Effective pixels per tile for one data path: the manifest override
+		// when present, else the node-wide value.
+		int tile_px_for_path(const std::string &p_path) const;
+		// Re-parse every data path's manifest after data_paths changes.
+		void rebuild_path_tile_px();
+
 		// Configuration.
 		// Meters per tile axis (drives LV95 tile-index math and file naming).
 		int tile_size = 1024;
@@ -170,6 +186,13 @@ namespace s3d
 		// Ordered list of directories to search for tile files.
 		// The first entry is returned by get_data_path() for backward compat.
 		godot::PackedStringArray data_paths;
+
+		// Per-data-path pixels-per-tile overrides, keyed by the exact path
+		// string in data_paths. Populated from each path's manifest.json
+		// ("pixels_per_tile") — this is what lets a data-light region
+		// (e.g. Norway at 34 px/tile) stream alongside CH/BW (512/1024 px)
+		// in one manager. Paths without an override fall back to tile_px.
+		std::unordered_map<std::string, int> path_tile_px;
 
 		double origin_east = 2600000.0;
 		double origin_north = 1200000.0;

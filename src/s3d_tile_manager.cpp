@@ -2,8 +2,10 @@
 #include "s3d_tile.h"
 
 #include <godot_cpp/core/class_db.hpp>
+#include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/classes/camera3d.hpp>
+#include <godot_cpp/classes/json.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/classes/time.hpp>
 
@@ -58,6 +60,59 @@ std::vector<std::string> S3DTileManager::ortho_paths_for_tile(int ei, int ni, in
 		out.push_back(std::string(p.utf8().get_data()) + suffix);
 	}
 	return out;
+}
+
+// --- Per-path tile resolution (manifest.json "pixels_per_tile") ---
+//
+// Every terrain build pipeline writes <terrain>/manifest.json next to the
+// raw tiles. Data-light regions bake far fewer pixels per 1024 m cell than
+// CH/BW (Norway: 34 px at ~31 m/px vs 512/1024 px), so a single node-wide
+// tile_px cannot serve all of them — the worker's hard file-size check
+// would reject every tile from the other-resolution paths. The manifest is
+// the source of truth; its absence means "same as the node value", which is
+// exactly how legacy regions (no pixels_per_tile field) keep working.
+
+int S3DTileManager::manifest_pixels_per_tile(const std::string &p_dir)
+{
+	String mpath = String(std::string(p_dir).c_str()) + "/manifest.json";
+	Ref<FileAccess> f = FileAccess::open(mpath, FileAccess::READ);
+	if (f.is_null()) {
+		return 0;
+	}
+	Variant v = JSON::parse_string(f->get_as_text());
+	if (v.get_type() != Variant::DICTIONARY) {
+		return 0;
+	}
+	Dictionary d = v;
+	if (!d.has("pixels_per_tile")) {
+		return 0;
+	}
+	int px = int(d["pixels_per_tile"]);
+	return px > 0 ? px : 0;
+}
+
+int S3DTileManager::tile_px_for_path(const std::string &p_path) const
+{
+	auto it = path_tile_px.find(p_path);
+	if (it != path_tile_px.end() && it->second > 0) {
+		return it->second;
+	}
+	return effective_tile_px();
+}
+
+void S3DTileManager::rebuild_path_tile_px()
+{
+	path_tile_px.clear();
+	for (int i = 0; i < data_paths.size(); i++) {
+		String p = data_paths[i];
+		if (p.is_empty()) continue;
+		std::string key(p.utf8().get_data());
+		int px = manifest_pixels_per_tile(key);
+		if (px > 0) {
+			path_tile_px[key] = px;
+			UtilityFunctions::print("S3DTileManager: per-path tile_px=", px, " for ", p);
+		}
+	}
 }
 
 // --- Constructor / Destructor ---
@@ -193,9 +248,15 @@ void S3DTileManager::worker_func()
 			std::vector<float> composite(cres * cres, NAN);
 			bool any_data = false;
 
-			// Cache tile data to avoid re-reading the same file.
-			std::unordered_map<uint64_t, std::vector<uint8_t>> tile_cache;
-			size_t expected = (size_t)ts_px * ts_px * 4;
+			// Cache tile data to avoid re-reading the same file. The px
+			// field records the resolution the bytes were loaded at — a
+			// chunk may span sources with different pixels_per_tile, and
+			// the sampling math below must use each entry's own grid.
+			struct CachedTile {
+				std::vector<uint8_t> data;
+				int px = 0;
+			};
+			std::unordered_map<uint64_t, CachedTile> tile_cache;
 
 			for (int cy = 0; cy < cres; cy++) {
 				for (int cx = 0; cx < cres; cx++) {
@@ -226,20 +287,31 @@ void S3DTileManager::worker_func()
 							+ std::to_string(lv95_north) + ".raw";
 						std::vector<uint8_t> data;
 						std::vector<uint8_t> scratch;
-						for (const auto &base : req.base_paths) {
-							std::ifstream file(base + tname, std::ios::binary);
+						int data_px = 0; // Resolution of the winning source.
+						for (size_t bi = 0; bi < req.base_paths.size(); bi++) {
+							// Each base path may store tiles at a different
+							// pixels_per_tile (manifest override); fall back
+							// to the node-wide value when undeclared.
+							int px_b = (bi < req.base_path_px.size() && req.base_path_px[bi] > 0)
+								? req.base_path_px[bi]
+								: ts_px;
+							size_t expected_b = (size_t)px_b * px_b * 4;
+							std::ifstream file(req.base_paths[bi] + tname, std::ios::binary);
 							if (!file.is_open()) continue;
-							scratch.resize(expected);
-							file.read(reinterpret_cast<char *>(scratch.data()), expected);
-							if ((size_t)file.gcount() != expected) {
+							scratch.resize(expected_b);
+							file.read(reinterpret_cast<char *>(scratch.data()), expected_b);
+							if ((size_t)file.gcount() != expected_b) {
 								scratch.clear();
 								continue;
 							}
 							if (data.empty()) {
 								data = std::move(scratch);
+								data_px = px_b;
 								scratch.clear();
-							} else {
+							} else if (scratch.size() == data.size()) {
 								// Merge: fill zero samples from this source.
+								// A size mismatch means the sources store
+								// different resolutions — keep the first.
 								float *dst = reinterpret_cast<float *>(data.data());
 								const float *src = reinterpret_cast<const float *>(scratch.data());
 								size_t n = data.size() / 4;
@@ -259,7 +331,7 @@ void S3DTileManager::worker_func()
 						// with a plausible elevation.
 						if (!data.empty()) {
 							float *d = reinterpret_cast<float *>(data.data());
-							int sz = ts_px;
+							int sz = data_px;
 							for (int r = 0; r < sz; r++) {
 								float last = 0.0f;
 								for (int c = 0; c < sz; c++) {
@@ -289,11 +361,11 @@ void S3DTileManager::worker_func()
 								}
 							}
 						}
-						tile_cache[tkey] = std::move(data);
+						tile_cache[tkey] = CachedTile{std::move(data), data_px};
 						cache_it = tile_cache.find(tkey);
 					}
 
-					if (cache_it->second.empty()) continue;
+					if (cache_it->second.data.empty()) continue;
 
 					// Block-average sample from the raw tile. Each composite
 					// cell covers (ts / (cres-1)) source pixels per axis, so
@@ -302,29 +374,33 @@ void S3DTileManager::worker_func()
 					// isolated zero / nodata pixels that slip past the
 					// per-tile gap-fill above, and dramatically reduces the
 					// chance of a whole chunk being classified as empty.
-					const float *tile_f = reinterpret_cast<const float *>(cache_it->second.data());
+					const float *tile_f = reinterpret_cast<const float *>(cache_it->second.data.data());
+					// Per-tile pixel grid: the cached bytes came from a source
+					// whose manifest may declare a different pixels_per_tile
+					// than the node-wide value.
+					int tpx_t = cache_it->second.px > 0 ? cache_it->second.px : ts_px;
 					double local_e = lv95_e - (double)tei * ts_m;
 					double local_n = lv95_n - (double)tni * ts_m;
 
-					int pcol_c = (int)std::round((ts_m - local_e) / ts_m * (ts_px - 1));
-					int prow_c = (int)std::round(local_n / ts_m * (ts_px - 1));
-					pcol_c = std::max(0, std::min(ts_px - 1, pcol_c));
-					prow_c = std::max(0, std::min(ts_px - 1, prow_c));
+					int pcol_c = (int)std::round((ts_m - local_e) / ts_m * (tpx_t - 1));
+					int prow_c = (int)std::round(local_n / ts_m * (tpx_t - 1));
+					pcol_c = std::max(0, std::min(tpx_t - 1, pcol_c));
+					prow_c = std::max(0, std::min(tpx_t - 1, prow_c));
 
 					// Supersampling window: ±K pixels around the nominal
 					// sample, clamped to the tile. K ≈ half a composite step
-					// (ts_px / (cres-1) / 2), capped to keep cost bounded.
-					int half = std::min(8, (int)(ts_px / (cres - 1) / 2));
+					// (tpx_t / (cres-1) / 2), capped to keep cost bounded.
+					int half = std::min(8, (int)(tpx_t / (cres - 1) / 2));
 
 					float sum = 0.0f;
 					int cnt = 0;
 					for (int dy = -half; dy <= half; dy++) {
 						int pr = prow_c + dy;
-						if (pr < 0 || pr >= ts_px) continue;
+						if (pr < 0 || pr >= tpx_t) continue;
 						for (int dx = -half; dx <= half; dx++) {
 							int pc = pcol_c + dx;
-							if (pc < 0 || pc >= ts_px) continue;
-							float v = tile_f[(size_t)pr * ts_px + pc];
+							if (pc < 0 || pc >= tpx_t) continue;
+							float v = tile_f[(size_t)pr * tpx_t + pc];
 							if (v != 0.0f) { sum += v; cnt++; }
 						}
 					}
@@ -405,11 +481,8 @@ void S3DTileManager::worker_func()
 		} else {
 			// --- Regular tile: read single file, trying each candidate path ---
 			result.tile_size = req.tile_size;
-			result.tile_px = req.tile_px > 0 ? req.tile_px : req.tile_size;
 			result.desired_lod = req.desired_lod;
 
-			size_t expected_size = (size_t)result.tile_px * result.tile_px * 4;
-			size_t sample_count = (size_t)result.tile_px * result.tile_px;
 			// Read all sources and merge per-pixel, with LATER sources
 			// overriding earlier ones at any pixel where the later source
 			// is non-zero. This lets the user encode authoritative priority
@@ -420,9 +493,20 @@ void S3DTileManager::worker_func()
 			// up to 40 m. A simple "first source wholesale" or "biggest
 			// coverage wins" rule fails on tiles where CH has 100 %
 			// coverage but only the DE corner is real ground truth.
+			//
+			// Each candidate path may store its tiles at a different pixel
+			// resolution (manifest.json pixels_per_tile), so the expected
+			// file size and the merge are per-candidate. A size mismatch
+			// between sources means different resolutions — the first
+			// source found wins for that tile (regions don't overlap in
+			// practice; CH/BW/Norway occupy disjoint LV95 areas).
 			std::vector<uint8_t> scratch;
-			for (const auto &candidate : req.paths) {
-				std::ifstream file(candidate, std::ios::binary);
+			for (size_t i = 0; i < req.paths.size(); i++) {
+				int px_i = (i < req.path_px.size() && req.path_px[i] > 0)
+					? req.path_px[i]
+					: (req.tile_px > 0 ? req.tile_px : req.tile_size);
+				size_t expected_size = (size_t)px_i * px_i * 4;
+				std::ifstream file(req.paths[i], std::ios::binary);
 				if (!file.is_open()) {
 					continue;
 				}
@@ -435,13 +519,15 @@ void S3DTileManager::worker_func()
 				if (!result.success) {
 					result.raw_bytes = std::move(scratch);
 					scratch.clear();
+					result.tile_px = px_i; // Winning source's resolution.
 					result.success = true;
-				} else {
+				} else if (scratch.size() == result.raw_bytes.size()) {
 					float *dst = reinterpret_cast<float *>(result.raw_bytes.data());
 					const float *src = reinterpret_cast<const float *>(scratch.data());
-					for (size_t i = 0; i < sample_count; ++i) {
-						if (src[i] != 0.0f) {
-							dst[i] = src[i];
+					size_t sample_count = scratch.size() / 4;
+					for (size_t k = 0; k < sample_count; ++k) {
+						if (src[k] != 0.0f) {
+							dst[k] = src[k];
 						}
 					}
 				}
@@ -1061,6 +1147,9 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 				req.key = key;
 				for (int i = 0; i < data_paths.size(); i++) {
 					req.paths.push_back(std::string((data_paths[i] + tname).utf8().get_data()));
+					std::string key(data_paths[i].utf8().get_data());
+					auto px_it = path_tile_px.find(key);
+					req.path_px.push_back(px_it != path_tile_px.end() ? px_it->second : 0);
 				}
 				req.tile_size = tile_size;
 				req.tile_px = effective_tile_px();
@@ -1151,7 +1240,11 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 
 			if (state.node->get_heightmap().is_valid() && !mip_change) {
 				int stride = 1 << state.desired_lod;
-				int verts_per_axis = (effective_tile_px() - 1) / stride + 1;
+				// Budget against the heightmap's actual resolution — with
+				// per-path pixels_per_tile (Norway 34 px vs CH/BW 512 px)
+				// the node-wide value would over-count ~200×.
+				int img_w = state.node->get_heightmap()->get_width();
+				int verts_per_axis = (img_w - 1) / stride + 1;
 				int tile_verts = verts_per_axis * verts_per_axis;
 
 				state.node->set_lod_level(state.desired_lod);
@@ -1197,6 +1290,9 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 					req.key = key;
 					for (int i = 0; i < data_paths.size(); i++) {
 						req.paths.push_back(std::string((data_paths[i] + tname).utf8().get_data()));
+						std::string key(data_paths[i].utf8().get_data());
+						auto px_it = path_tile_px.find(key);
+						req.path_px.push_back(px_it != path_tile_px.end() ? px_it->second : 0);
 					}
 					req.tile_size = tile_size;
 					req.tile_px = effective_tile_px();
@@ -1389,6 +1485,10 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 				req.tile_size = tile_size;
 				req.tile_px = effective_tile_px();
 				req.base_paths = base_paths_str;
+				for (const auto &bp : base_paths_str) {
+					auto px_it = path_tile_px.find(bp);
+					req.base_path_px.push_back(px_it != path_tile_px.end() ? px_it->second : 0);
+				}
 				req.distance = min_dist;
 				for (int i = 0; i < orthophoto_paths.size(); i++) {
 					String p = orthophoto_paths[i];
@@ -1548,6 +1648,7 @@ void S3DTileManager::set_data_path(const String &p_path)
 	if (!p_path.is_empty()) {
 		data_paths.push_back(p_path);
 	}
+	rebuild_path_tile_px();
 }
 
 String S3DTileManager::get_data_path() const
@@ -1558,6 +1659,7 @@ String S3DTileManager::get_data_path() const
 void S3DTileManager::set_data_paths(const PackedStringArray &p_paths)
 {
 	data_paths = p_paths;
+	rebuild_path_tile_px();
 }
 
 PackedStringArray S3DTileManager::get_data_paths() const
