@@ -47,8 +47,9 @@ USER_AGENT = "scenery3d-lgl-dop-downloader/1.0"
 TILE_STEP_KM = 2
 
 # Default: Baden-Württemberg bounding box in UTM32 km (generous; 404s skipped).
-# BW extent roughly: E 432-612, N 5262-5518 km.
-DEFAULT_EXTENT = (432, 5262, 612, 5518)
+# BW reaches the Rhine at E≈388 (Breisgau / Markgräflerland); an earlier
+# E_min of 432 silently clipped the whole western Rhine valley.
+DEFAULT_EXTENT = (388, 5262, 612, 5518)
 
 
 def tile_url(e_km: int, n_km: int) -> str:
@@ -59,17 +60,32 @@ def tile_name(e_km: int, n_km: int) -> str:
     return f"dop20rgb_32_{e_km}_{n_km}_2_bw"
 
 
-def http_head(url: str, timeout: float = 15.0) -> tuple[int, int]:
+def http_head(url: str, timeout: float = 15.0, retries: int = 4) -> tuple[int, int]:
+    """Return (status_code, content_length_or_0). Network errors → (0, 0).
+
+    Transient failures are retried with exponential backoff so they are never
+    mistaken for "tile absent" (which would silently drop existing tiles).
+    """
     req = urllib.request.Request(url, method="HEAD",
                                  headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            length = int(resp.headers.get("Content-Length", "0") or 0)
-            return resp.status, length
-    except urllib.error.HTTPError as e:
-        return e.code, 0
-    except (urllib.error.URLError, TimeoutError, OSError):
-        return 0, 0
+    backoff = 0.5
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                length = int(resp.headers.get("Content-Length", "0") or 0)
+                return resp.status, length
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503, 504) and attempt < retries:
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            return e.code, 0
+        except (urllib.error.URLError, TimeoutError, OSError):
+            if attempt < retries:
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            return 0, 0
 
 
 def http_download(url: str, dest: Path, expected_size: int = 0,

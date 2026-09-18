@@ -38,7 +38,7 @@ USER_AGENT = "scenery3d-lgl-lod2-downloader/1.0"
 
 # Default: full Baden-Württemberg (UTM32 km). Tile anchoring is odd-E/even-N,
 # but the probe step harmlessly rejects mis-anchored candidates.
-DEFAULT_EXTENT = (432, 5262, 612, 5518)
+DEFAULT_EXTENT = (388, 5262, 612, 5518)
 
 
 def tile_url(e_km: int, n_km: int) -> str:

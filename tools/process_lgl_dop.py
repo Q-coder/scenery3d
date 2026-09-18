@@ -208,24 +208,32 @@ def build_index(zip_dir: Path,
     zip_to_tiles: dict[Path, list[tuple[int, int]]] = {}
     deferred = 0
 
+    if extent is not None:
+        ee_min, en_min, ee_max, en_max = extent
+        tx_lo = int(np.floor(ee_min / TILE_SIZE_M))
+        tx_hi = int(np.floor((ee_max - 1e-3) / TILE_SIZE_M))
+        tz_lo = int(np.floor(en_min / TILE_SIZE_M))
+        tz_hi = int(np.floor((en_max - 1e-3) / TILE_SIZE_M))
+        # Snap the ZIP filter out to whole tiles. The tile range is derived by
+        # FLOORING the extent, so edge tiles stick out past it; rejecting ZIPs
+        # on the raw extent would render those tiles without their outermost
+        # sources and leave a no-data band along the extent boundary.
+        se_min = tx_lo * TILE_SIZE_M
+        se_max = (tx_hi + 1) * TILE_SIZE_M
+        sn_min = tz_lo * TILE_SIZE_M
+        sn_max = (tz_hi + 1) * TILE_SIZE_M
+
     for zp in zips:
         cell = parse_zip_name(zp)
         if cell is None:
             continue
         bbox = utm_cell_to_lv95_bbox(*cell)
-        if extent is not None:
-            le, ln, re_, rn = bbox
-            ee_min, en_min, ee_max, en_max = extent
-            if (re_ <= ee_min or le >= ee_max
-                    or rn <= en_min or ln >= en_max):
-                continue
         tiles = lv95_bbox_to_tiles(bbox)
         if extent is not None:
-            ee_min, en_min, ee_max, en_max = extent
-            tx_lo = int(np.floor(ee_min / TILE_SIZE_M))
-            tx_hi = int(np.floor((ee_max - 1e-3) / TILE_SIZE_M))
-            tz_lo = int(np.floor(en_min / TILE_SIZE_M))
-            tz_hi = int(np.floor((en_max - 1e-3) / TILE_SIZE_M))
+            le, ln, re_, rn = bbox
+            if (re_ <= se_min or le >= se_max
+                    or rn <= sn_min or ln >= sn_max):
+                continue
             tiles = [(tx, tz) for (tx, tz) in tiles
                      if tx_lo <= tx <= tx_hi and tz_lo <= tz <= tz_hi]
         if not tiles:

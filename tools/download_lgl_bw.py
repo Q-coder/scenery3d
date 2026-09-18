@@ -51,8 +51,9 @@ TILE_STEP_KM = 2
 USER_AGENT = "scenery3d-lgl-bw-downloader/1.0 (https://github.com/)"
 
 # Default: Baden-Württemberg bounding box in UTM32 km (generous; 404s skipped).
-# BW extent roughly: E 432-612, N 5262-5518 km.
-DEFAULT_EXTENT = (432, 5262, 612, 5518)
+# BW reaches the Rhine at E≈388 (Breisgau / Markgräflerland); an earlier
+# E_min of 432 silently clipped the whole western Rhine valley.
+DEFAULT_EXTENT = (388, 5262, 612, 5518)
 
 
 def tile_url(e_km: int, n_km: int) -> str:
@@ -63,17 +64,33 @@ def tile_name(e_km: int, n_km: int) -> str:
     return f"dgm1_32_{e_km}_{n_km}_2_bw"
 
 
-def http_head(url: str, timeout: float = 15.0) -> tuple[int, int]:
-    """Return (status_code, content_length_or_0). Network errors → (0, 0)."""
+def http_head(url: str, timeout: float = 15.0, retries: int = 4) -> tuple[int, int]:
+    """Return (status_code, content_length_or_0). Network errors → (0, 0).
+
+    A transient failure must NOT be confused with "tile absent": the probe
+    caller keeps only status==200, so returning 0 on a blip silently drops a
+    tile that exists on the server. Retry transient errors (and 429/5xx) with
+    exponential backoff; only a definite 404 means absent.
+    """
     req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            length = int(resp.headers.get("Content-Length", "0") or 0)
-            return resp.status, length
-    except urllib.error.HTTPError as e:
-        return e.code, 0
-    except (urllib.error.URLError, TimeoutError, OSError):
-        return 0, 0
+    backoff = 0.5
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                length = int(resp.headers.get("Content-Length", "0") or 0)
+                return resp.status, length
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503, 504) and attempt < retries:
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            return e.code, 0
+        except (urllib.error.URLError, TimeoutError, OSError):
+            if attempt < retries:
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            return 0, 0
 
 
 def http_download(url: str, dest: Path, expected_size: int = 0,
@@ -98,13 +115,21 @@ def http_download(url: str, dest: Path, expected_size: int = 0,
 
 
 def enumerate_candidates(extent: tuple[int, int, int, int]) -> list[tuple[int, int]]:
-    # LGL 2 km tiles don't align with even km boundaries in both axes
-    # (observed grid: odd E km, even N km). Probe every integer km in the
-    # bbox; non-existent cells just return 404 from the HEAD probe.
+    # LGL 2 km tiles are anchored on odd E km / even N km. Enumerating only
+    # the anchors cuts probes 4x and keeps the HEAD burst below the rate
+    # limit that used to turn valid tiles into silent misses.
     e_min, n_min, e_max, n_max = extent
+
+    e0 = int(e_min)
+    if (e0 % 2) == 0:
+        e0 += 1
+    n0 = int(n_min)
+    if (n0 % 2) != 0:
+        n0 += 1
+
     cells = []
-    for e in range(int(e_min), int(e_max)):
-        for n in range(int(n_min), int(n_max)):
+    for e in range(e0, int(e_max), TILE_STEP_KM):
+        for n in range(n0, int(n_max), TILE_STEP_KM):
             cells.append((e, n))
     return cells
 
