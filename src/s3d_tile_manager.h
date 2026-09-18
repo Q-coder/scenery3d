@@ -120,6 +120,10 @@ namespace s3d
 			// Per-tile ortho JPEGs for chunk compositing.
 			// Key: (local_x * chunk_count + local_y), value: JPEG bytes.
 			std::unordered_map<int, std::vector<uint8_t>> chunk_ortho_jpegs;
+			// Same, pre-composited across sources in the worker (no-data
+			// pixels filled from lower-priority sources): raw RGB8, w² px.
+			struct RawRgb { int w = 0; std::vector<uint8_t> rgb; };
+			std::unordered_map<int, RawRgb> chunk_ortho_rgb;
 			int chunk_tile_count = 0;
 		};
 

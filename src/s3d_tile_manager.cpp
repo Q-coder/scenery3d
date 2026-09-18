@@ -18,6 +18,56 @@ using namespace godot;
 
 namespace s3d {
 
+// --- Orthophoto no-data test ---
+// SWISSIMAGE encodes territory outside Switzerland as solid white in most
+// border tiles but as solid BLACK in others (e.g. around the Jestetten
+// enclave near Rafz, 78-90 % of a tile). Both must yield to a lower-priority
+// source. JPEG compression leaves the flat areas a few counts off pure
+// white/black, hence the tolerances (which also removed the thin white line
+// that survived the exact ==255 test at the CH/DE border).
+static inline bool ortho_is_nodata(uint8_t r, uint8_t g, uint8_t b)
+{
+	return (r >= 250 && g >= 250 && b >= 250) || (r <= 6 && g <= 6 && b <= 6);
+}
+
+// How much a pixel should take from the next source, 0..1. Pure no-data is
+// 1; pixels *near* white or black blend partially. The on-disk mips (mip2 /
+// mip3, used for distant tiles and the far chunks) were downsampled from
+// tiles with white margins, so along the outer edge of the Swiss set their
+// edge pixels are light averages of white and ground — not "white", yet a
+// visible light staircase from altitude. Blending them toward the other
+// source is safe: both orthophotos show the same ground.
+static inline float ortho_nodata_weight(uint8_t r, uint8_t g, uint8_t b)
+{
+	const int mn = MIN(r, MIN(g, b));
+	const int mx = MAX(r, MAX(g, b));
+	if (mn >= 250 || mx <= 6) return 1.0f;
+	if (mn >= 200) return (float)(mn - 200) / 50.0f;  // 200..250 -> 0..1
+	if (mx <= 14) return (float)(14 - mx) / 8.0f;      // 14..6 -> 0..1
+	return 0.0f;
+}
+
+// Merge `src` into `dst` (both RGB8, same size): no-data pixels of dst take
+// src's pixel, near-no-data pixels blend toward it. Returns true when
+// (near-)no-data pixels remain in dst.
+static bool ortho_merge_nodata(PackedByteArray &dst, const PackedByteArray &src)
+{
+	uint8_t *cp = dst.ptrw();
+	const uint8_t *ip = src.ptr();
+	const int64_t n = dst.size() / 3;
+	bool left = false;
+	for (int64_t i = 0; i < n; i++) {
+		const int64_t idx = i * 3;
+		const float w = ortho_nodata_weight(cp[idx], cp[idx + 1], cp[idx + 2]);
+		if (w <= 0.0f) continue;
+		for (int c = 0; c < 3; c++) {
+			cp[idx + c] = (uint8_t)(cp[idx + c] * (1.0f - w) + ip[idx + c] * w + 0.5f);
+		}
+		if (ortho_nodata_weight(cp[idx], cp[idx + 1], cp[idx + 2]) > 0.5f) left = true;
+	}
+	return left;
+}
+
 // --- Orthophoto mip path helper ---
 
 int S3DTileManager::ortho_mip_for_lod(int lod)
@@ -536,9 +586,19 @@ void S3DTileManager::worker_func()
 						std::string fname = "/ortho_"
 							+ std::to_string(lv95_e) + "_" + std::to_string(lv95_n) + ".jpg";
 
-						// Try each ortho root in order — first hit wins.
+						// Try each ortho root in priority order. With
+						// skip_white_pixels and 2+ roots the mip3 tiles are
+						// composited like the full-res ones (no-data pixels
+						// of a higher-priority source filled from the next);
+						// first-hit-wins otherwise. Without this the far
+						// chunks showed SWISSIMAGE's white/black margins as
+						// a wide stripe along the CH/DE border.
+						const bool chunk_composite = skip_white_pixels && req.ortho_mip_dirs.size() >= 2;
 						std::vector<uint8_t> jbuf;
+						Ref<Image> comp;
+						bool nodata_left = true;
 						for (const auto &dir : req.ortho_mip_dirs) {
+							if (chunk_composite && comp.is_valid() && !nodata_left) break;
 							std::string opath = dir + fname;
 							std::ifstream jpf(opath, std::ios::binary | std::ios::ate);
 							if (!jpf.is_open()) continue;
@@ -548,11 +608,37 @@ void S3DTileManager::worker_func()
 							jbuf.resize(fsize);
 							jpf.read(reinterpret_cast<char *>(jbuf.data()), fsize);
 							if ((size_t)jpf.gcount() != fsize) { jbuf.clear(); continue; }
-							break;
+							if (!chunk_composite) break;
+							PackedByteArray jpkg;
+							jpkg.resize((int)jbuf.size());
+							memcpy(jpkg.ptrw(), jbuf.data(), jbuf.size());
+							Ref<Image> img = Image::create_empty(1, 1, false, Image::FORMAT_RGB8);
+							if (img->load_jpg_from_buffer(jpkg) != OK || img->get_width() < 2) continue;
+							if (img->get_format() != Image::FORMAT_RGB8) img->convert(Image::FORMAT_RGB8);
+							if (comp.is_null()) {
+								comp = img;
+								PackedByteArray d = comp->get_data();
+								nodata_left = false;
+								const uint8_t *p = d.ptr();
+								for (int64_t i = 0; i + 2 < d.size(); i += 3) {
+									if (ortho_is_nodata(p[i], p[i + 1], p[i + 2])) { nodata_left = true; break; }
+								}
+							} else if (img->get_width() == comp->get_width() && img->get_height() == comp->get_height()) {
+								PackedByteArray cdata = comp->get_data();
+								nodata_left = ortho_merge_nodata(cdata, img->get_data());
+								comp = Image::create_from_data(comp->get_width(), comp->get_height(), false, Image::FORMAT_RGB8, cdata);
+							}
+						}
+						int key = tdx * csize + tdy;
+						if (chunk_composite && comp.is_valid()) {
+							LoadResult::RawRgb raw;
+							raw.w = comp->get_width();
+							PackedByteArray d = comp->get_data();
+							raw.rgb.assign(d.ptr(), d.ptr() + d.size());
+							result.chunk_ortho_rgb[key] = std::move(raw);
+							continue;
 						}
 						if (jbuf.empty()) continue;
-
-						int key = tdx * csize + tdy;
 						result.chunk_ortho_jpegs[key] = std::move(jbuf);
 					}
 				}
@@ -734,23 +820,13 @@ void S3DTileManager::worker_func()
 						}
 						PackedByteArray cdata = composite_img->get_data();
 						PackedByteArray idata = img->get_data();
-						uint8_t *cp = cdata.ptrw();
-						const uint8_t *ip = idata.ptr();
-						int npx = composite_img->get_width() * composite_img->get_height();
-						for (int i = 0; i < npx; i++) {
-							int idx = i * 3;
-							if (cp[idx] == 255 && cp[idx + 1] == 255 && cp[idx + 2] == 255) {
-								cp[idx]     = ip[idx];
-								cp[idx + 1] = ip[idx + 1];
-								cp[idx + 2] = ip[idx + 2];
-							}
-						}
+						ortho_merge_nodata(cdata, idata);
 						composite_img = Image::create_from_data(
 							composite_img->get_width(), composite_img->get_height(),
 							false, Image::FORMAT_RGB8, cdata);
 					}
 
-					// Quick scan: any white pixels remaining? If not, stop.
+					// Quick scan: any no-data pixels remaining? If not, stop.
 					{
 						PackedByteArray cdata = composite_img->get_data();
 						const uint8_t *cp = cdata.ptr();
@@ -760,7 +836,7 @@ void S3DTileManager::worker_func()
 						int step = npx > 4096 ? 16 : 1;
 						for (int i = 0; i < npx; i += step) {
 							int idx = i * 3;
-							if (cp[idx] == 255 && cp[idx + 1] == 255 && cp[idx + 2] == 255) {
+							if (ortho_is_nodata(cp[idx], cp[idx + 1], cp[idx + 2])) {
 								found = true;
 								break;
 							}
@@ -848,7 +924,7 @@ void S3DTileManager::process_load_results(int &verts_generated)
 
 				// Composite ortho texture from per-tile mip3 JPEGs.
 				bool ortho_applied = false;
-				if (!result.chunk_ortho_jpegs.empty() && result.chunk_tile_count > 0) {
+				if ((!result.chunk_ortho_jpegs.empty() || !result.chunk_ortho_rgb.empty()) && result.chunk_tile_count > 0) {
 					int cs = result.chunk_tile_count;
 					int mip_px = 16; // mip3 pixels per tile
 					int comp_size = cs * mip_px;
@@ -858,17 +934,27 @@ void S3DTileManager::process_load_results(int &verts_generated)
 					Ref<Image> comp_img = Image::create_empty(comp_size, comp_size, false, Image::FORMAT_RGB8);
 					bool any_decoded = false;
 
+					// Worker-composited tiles first (raw RGB), then plain JPEGs.
+					std::vector<std::pair<int, Ref<Image>>> chunk_imgs;
+					for (auto &[tkey, raw] : result.chunk_ortho_rgb) {
+						if (raw.w < 2 || raw.rgb.size() < (size_t)raw.w * raw.w * 3) continue;
+						PackedByteArray d;
+						d.resize((int64_t)raw.rgb.size());
+						memcpy(d.ptrw(), raw.rgb.data(), raw.rgb.size());
+						chunk_imgs.emplace_back(tkey, Image::create_from_data(raw.w, raw.w, false, Image::FORMAT_RGB8, d));
+					}
 					for (auto &[tkey, jbuf] : result.chunk_ortho_jpegs) {
-						int tdx = tkey / cs; // local x (easting offset)
-						int tdy = tkey % cs; // local y (northing offset)
-
 						PackedByteArray jpkg;
 						jpkg.resize(jbuf.size());
 						memcpy(jpkg.ptrw(), jbuf.data(), jbuf.size());
-
 						Ref<Image> tile_img = Image::create_empty(1, 1, false, Image::FORMAT_RGB8);
 						Error err = tile_img->load_jpg_from_buffer(jpkg);
 						if (err != OK || tile_img->get_width() < 2) continue;
+						chunk_imgs.emplace_back(tkey, tile_img);
+					}
+					for (auto &[tkey, tile_img] : chunk_imgs) {
+						int tdx = tkey / cs; // local x (easting offset)
+						int tdy = tkey % cs; // local y (northing offset)
 
 						// Ensure correct format
 						if (tile_img->get_format() != Image::FORMAT_RGB8) {
