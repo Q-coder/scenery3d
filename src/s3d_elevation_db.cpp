@@ -39,6 +39,7 @@ void S3DElevationDB::_bind_methods()
 	ClassDB::bind_method(D_METHOD("has_tile", "tile_x", "tile_z"), &S3DElevationDB::has_tile);
 
 	ClassDB::bind_method(D_METHOD("get_elevation", "x", "z"), &S3DElevationDB::get_elevation);
+	ClassDB::bind_method(D_METHOD("get_elevation_grid", "e", "n"), &S3DElevationDB::get_elevation_grid);
 	ClassDB::bind_method(D_METHOD("get_elevation_safe", "x", "z", "default_val"), &S3DElevationDB::get_elevation_safe);
 }
 
@@ -103,11 +104,12 @@ bool S3DElevationDB::has_tile(int tile_x, int tile_z) const
 
 double S3DElevationDB::get_elevation(double x, double z) const
 {
-	// Convert world coordinates to absolute LV95.
-	// +X = West, so LV95_E = origin_east - x
-	double lv95_e = origin_east - x;
-	double lv95_n = z + origin_north;
+	// Convert flat world coordinates to absolute LV95 (+X = West).
+	return get_elevation_grid(origin_east - x, z + origin_north);
+}
 
+double S3DElevationDB::get_elevation_grid(double lv95_e, double lv95_n) const
+{
 	// Compute absolute tile indices (matching tile_key used in load_tile).
 	int tile_x = (int)floor(lv95_e / tile_size);
 	int tile_z = (int)floor(lv95_n / tile_size);

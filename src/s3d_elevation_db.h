@@ -53,8 +53,11 @@ namespace s3d
 		void unload_tile(int tile_x, int tile_z);
 		bool has_tile(int tile_x, int tile_z) const;
 
+		// Flat-frame query (world x/z around origin_*), legacy hosts.
 		double get_elevation(double x, double z) const;
 		double get_elevation_safe(double x, double z, double default_val) const;
+		// Grid query (LV95 E/N metres): the core; frame-independent.
+		double get_elevation_grid(double e, double n) const;
 
 		// Monotonically increasing counter; consumers compare against a
 		// stored value to know whether new tiles have been ingested.

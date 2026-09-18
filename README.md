@@ -77,6 +77,23 @@ across many frames so the simulation never stalls:
 - `CHUNKS_PER_FRAME = 1` — each chunk decodes up to `chunk_size²` mip3 JPEGs
   and builds a composite texture, so one per frame is plenty.
 
+### World Frame (`frame_mode`)
+
+`Scenery3D.frame_mode` selects where the geometry lives (see `src/s3d_frame.h`):
+
+| Mode | World | Placement |
+|------|-------|-----------|
+| `0` flat (default) | The LV95 plane around `origin_east/north`: X = origin_east − E (+X West), Y = m ASL, Z = N − origin_north | translation only (legacy) |
+| `1` ECEF | WGS84 Earth-centred metres (double-precision engine required) | each tile/chunk/GLB/tree tile is placed with the local West-Up-North frame at its tile centre on the ellipsoid, times the LV95 → true-metres Jacobian (scale + grid convergence); terrain tiles subtract the curvature sag per vertex, 8 km far chunks are projected exactly per vertex |
+
+Meshes and GLB data stay in tile-local flat coordinates in both modes, so no
+scenery pack changes. The camera is mapped to grid E/N through the frame
+(ECEF → geodetic → LV95). Elevation queries: `get_elevation(x, z)` (flat
+world), `get_elevation_grid(e, n)`, `get_elevation_geodetic(lat, lon)`,
+`get_elevation_world(pos)`. The host-wired `S3DVegetationManager` has its
+own `frame_mode` property. Headless check: ProVPilot
+`tests/smoke_scenery_ecef.tscn`.
+
 ### Coordinate Convention
 
 Matches the ProVPilot terrain convention:

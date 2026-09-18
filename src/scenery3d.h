@@ -29,6 +29,7 @@ namespace s3d
 		int far_radius = 200;
 		double origin_east = 2600000.0;
 		double origin_north = 1200000.0;
+		int frame_mode = 0;  // 0 = flat legacy, 1 = ECEF (S3DFrame)
 		godot::String data_path;
 		godot::PackedStringArray data_paths;
 		godot::String buildings_path;
@@ -56,8 +57,17 @@ namespace s3d
 		void _ready() override;
 		void _process(double delta) override;
 
-		// Query terrain elevation at world coordinates (x, z).
+		// Query terrain elevation at FLAT world coordinates (x, z) — legacy.
 		double get_elevation(double x, double z) const;
+		// Frame-independent queries (design §9.5): grid E/N, WGS84, or a
+		// world position in the current frame. NaN when no tile is loaded.
+		double get_elevation_grid(double e, double n) const;
+		double get_elevation_geodetic(double latitude, double longitude) const;
+		double get_elevation_world(godot::Vector3 world_pos) const;
+
+		// 0 = flat legacy frame, 1 = ECEF; fanned out to every child.
+		void set_frame_mode(int p_mode);
+		int get_frame_mode() const;
 
 		// Access the elevation database directly (e.g. for JSBSim integration).
 		godot::Ref<S3DElevationDB> get_elevation_db() const;

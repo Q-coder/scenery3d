@@ -576,8 +576,9 @@ void S3DWaterManager::_process(double delta)
 
 void S3DWaterManager::update_tiles(Vector3 camera_pos)
 {
-	double cam_e = origin_east - camera_pos.x;
-	double cam_n = camera_pos.z + origin_north;
+	const proj::EN cam_grid = frame.world_to_grid(camera_pos);
+	double cam_e = cam_grid.e;
+	double cam_n = cam_grid.n;
 	last_cam_e = cam_e;
 	last_cam_n = cam_n;
 
@@ -691,17 +692,33 @@ void S3DWaterManager::process_load_results()
 		size_t colon = result.tile_id.find(':');
 		double dx = 0.0, dz = 0.0;
 		bool elevation_baked = false;
+		double anchor_e = origin_east, anchor_n = origin_north;
+		double center_e = origin_east, center_n = origin_north;
 		if (colon != std::string::npos) {
 			size_t gi = (size_t)std::stoul(result.tile_id.substr(0, colon));
 			if (gi < manifests.size()) {
-				dx = origin_east - manifests[gi].conv_origin_e;
-				dz = manifests[gi].conv_origin_n - origin_north;
+				anchor_e = manifests[gi].conv_origin_e;
+				anchor_n = manifests[gi].conv_origin_n;
+				dx = origin_east - anchor_e;
+				dz = anchor_n - origin_north;
 				elevation_baked = manifests[gi].elevation_baked;
+				auto eit = manifests[gi].entries.find(result.tile_id.substr(colon + 1));
+				if (eit != manifests[gi].entries.end()) {
+					center_e = eit->second.center_e;
+					center_n = eit->second.center_n;
+				} else {
+					center_e = anchor_e;
+					center_n = anchor_n;
+				}
 			}
 		}
 
 		state.dx = dx;
 		state.dz = dz;
+		state.anchor_e = anchor_e;
+		state.anchor_n = anchor_n;
+		state.center_e = center_e;
+		state.center_n = center_n;
 		state.baked = result.surface;
 
 		// Detect bake bugs: some "baked" water polygons ship with grossly
@@ -782,7 +799,8 @@ void S3DWaterManager::process_load_results()
 		// place the root at y=0.  For un-baked tiles keep the legacy
 		// behaviour: y=vertical_offset_m when no elevation_db is set.
 		float root_y = (elevation_baked || elevation_db.is_valid()) ? 0.0f : (float)vertical_offset_m;
-		mi->set_position(Vector3((float)dx, root_y, (float)dz));
+		state.root_y = root_y;
+		mi->set_transform(frame.place(anchor_e, anchor_n, center_e, center_n, root_y));
 		add_child(mi);
 
 		state.node = mi;
@@ -827,11 +845,16 @@ bool S3DWaterManager::apply_drape(TileState &state, bool &out_fully_resolved)
 	int n_resolved = 0;
 	PackedFloat64Array sampled;
 	sampled.resize(vn);
+	// Sample the DTM in grid coordinates (vertices are flat offsets from
+	// the manifest conversion origin), and in ECEF mode pull each vertex
+	// down by the curvature sag about the tile centre so the draped surface
+	// follows the ellipsoid like the terrain tiles do.
+	const double cx_local = state.anchor_e - state.center_e;
+	const double cz_local = state.center_n - state.anchor_n;
 	for (int i = 0; i < vn; i++) {
 		Vector3 v = verts[i];
-		double world_x = (double)v.x + state.dx;
-		double world_z = (double)v.z + state.dz;
-		double h = elevation_db->get_elevation(world_x, world_z);
+		double h = elevation_db->get_elevation_grid(state.anchor_e - (double)v.x, (double)v.z + state.anchor_n);
+		if (!std::isnan(h)) h -= frame.sag((double)v.x - cx_local, (double)v.z - cz_local);
 		sampled[i] = h;
 		if (!std::isnan(h)) {
 			sum_h += h;
@@ -842,13 +865,13 @@ bool S3DWaterManager::apply_drape(TileState &state, bool &out_fully_resolved)
 		state.drape_failures++;
 		if (!state.warned) {
 			state.warned = true;
-			double v0x = vn > 0 ? (double)verts[0].x + state.dx : 0;
-			double v0z = vn > 0 ? (double)verts[0].z + state.dz : 0;
-			int tx = (int)std::floor((elevation_db->get_origin_east() - v0x) / (double)elevation_db->get_tile_size());
-			int tz = (int)std::floor((v0z + elevation_db->get_origin_north()) / (double)elevation_db->get_tile_size());
+			double v0e = vn > 0 ? state.anchor_e - (double)verts[0].x : 0;
+			double v0n = vn > 0 ? (double)verts[0].z + state.anchor_n : 0;
+			int tx = (int)std::floor(v0e / (double)elevation_db->get_tile_size());
+			int tz = (int)std::floor(v0n / (double)elevation_db->get_tile_size());
 			bool has = elevation_db->has_tile(tx, tz);
 			UtilityFunctions::print("S3DWaterManager: drape pending, no DTM samples; vn=",
-				(int64_t)vn, " first world=(", v0x, ",", v0z, ") wants tile (", tx, ",", tz, ") has=", has);
+				(int64_t)vn, " first grid=(", v0e, ",", v0n, ") wants tile (", tx, ",", tz, ") has=", has);
 		}
 		if (state.drape_failures >= 4 && !std::isnan(last_known_terrain_y)) {
 			for (int i = 0; i < vn; i++) {
@@ -939,6 +962,9 @@ void S3DWaterManager::_bind_methods()
 	ClassDB::bind_method(D_METHOD("set_origin_north", "north"), &S3DWaterManager::set_origin_north);
 	ClassDB::bind_method(D_METHOD("get_origin_north"), &S3DWaterManager::get_origin_north);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "origin_north"), "set_origin_north", "get_origin_north");
+	ClassDB::bind_method(D_METHOD("set_frame_mode", "mode"), &S3DWaterManager::set_frame_mode);
+	ClassDB::bind_method(D_METHOD("get_frame_mode"), &S3DWaterManager::get_frame_mode);
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "frame_mode"), "set_frame_mode", "get_frame_mode");
 
 	ClassDB::bind_method(D_METHOD("set_load_radius_m", "radius"), &S3DWaterManager::set_load_radius_m);
 	ClassDB::bind_method(D_METHOD("get_load_radius_m"), &S3DWaterManager::get_load_radius_m);
@@ -1010,10 +1036,11 @@ void S3DWaterManager::set_water_paths(const PackedStringArray &p_paths)
 }
 PackedStringArray S3DWaterManager::get_water_paths() const { return water_paths; }
 
-void S3DWaterManager::set_origin_east(double p_east) { origin_east = p_east; }
+void S3DWaterManager::set_origin_east(double p_east) { origin_east = p_east; frame.origin_east = p_east; }
 double S3DWaterManager::get_origin_east() const { return origin_east; }
 
-void S3DWaterManager::set_origin_north(double p_north) { origin_north = p_north; }
+void S3DWaterManager::set_origin_north(double p_north) { origin_north = p_north; frame.origin_north = p_north; }
+void S3DWaterManager::set_frame_mode(int p_mode) { frame.mode = (p_mode == S3DFrame::ECEF) ? S3DFrame::ECEF : S3DFrame::FLAT; }
 double S3DWaterManager::get_origin_north() const { return origin_north; }
 
 void S3DWaterManager::set_load_radius_m(int p_radius) { load_radius_m = p_radius; }
@@ -1028,9 +1055,9 @@ void S3DWaterManager::set_vertical_offset_m(double p_offset)
 	// Apply immediately to already-loaded tiles.
 	for (auto &kv : tiles) {
 		if (kv.second.node) {
-			Vector3 pos = kv.second.node->get_position();
-			pos.y = (float)p_offset;
-			kv.second.node->set_position(pos);
+			TileState &st = kv.second;
+			st.root_y = p_offset;
+			st.node->set_transform(frame.place(st.anchor_e, st.anchor_n, st.center_e, st.center_n, st.root_y));
 		}
 	}
 }

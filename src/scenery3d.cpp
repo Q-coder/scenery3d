@@ -1,4 +1,6 @@
 #include "scenery3d.h"
+#include "s3d_proj.h"
+#include <cmath>
 #include "s3d_tile_manager.h"
 #include "s3d_building_manager.h"
 #include "s3d_water_manager.h"
@@ -25,6 +27,12 @@ Scenery3D::~Scenery3D()
 void Scenery3D::_bind_methods()
 {
 	ClassDB::bind_method(D_METHOD("get_elevation", "x", "z"), &Scenery3D::get_elevation);
+	ClassDB::bind_method(D_METHOD("get_elevation_grid", "e", "n"), &Scenery3D::get_elevation_grid);
+	ClassDB::bind_method(D_METHOD("get_elevation_geodetic", "latitude", "longitude"), &Scenery3D::get_elevation_geodetic);
+	ClassDB::bind_method(D_METHOD("get_elevation_world", "world_pos"), &Scenery3D::get_elevation_world);
+	ClassDB::bind_method(D_METHOD("set_frame_mode", "mode"), &Scenery3D::set_frame_mode);
+	ClassDB::bind_method(D_METHOD("get_frame_mode"), &Scenery3D::get_frame_mode);
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "frame_mode"), "set_frame_mode", "get_frame_mode");
 	ClassDB::bind_method(D_METHOD("get_elevation_db"), &Scenery3D::get_elevation_db);
 	ClassDB::bind_method(D_METHOD("get_tile_manager"), &Scenery3D::get_tile_manager);
 	ClassDB::bind_method(D_METHOD("get_coords"), &Scenery3D::get_coords);
@@ -125,6 +133,7 @@ void Scenery3D::_ready()
 	tile_manager->set_data_paths(data_paths);
 	tile_manager->set_origin_east(origin_east);
 	tile_manager->set_origin_north(origin_north);
+	tile_manager->set_frame_mode(frame_mode);
 	// Resolve orthophoto_paths: array wins, then single path, then project setting.
 	if (orthophoto_paths.is_empty() && !orthophoto_path.is_empty()) {
 		orthophoto_paths.push_back(orthophoto_path);
@@ -152,6 +161,7 @@ void Scenery3D::_ready()
 	coords.instantiate();
 	coords->set_origin_east(origin_east);
 	coords->set_origin_north(origin_north);
+	coords->set_frame_mode(frame_mode);
 
 	// Create the building manager.
 	// Resolve buildings_paths: if empty, fall back to buildings_path (single),
@@ -178,6 +188,7 @@ void Scenery3D::_ready()
 	add_child(building_manager);
 	building_manager->set_origin_east(origin_east);
 	building_manager->set_origin_north(origin_north);
+	building_manager->set_frame_mode(frame_mode);
 	building_manager->set_buildings_paths(buildings_paths);
 
 	// Create the water manager.
@@ -195,6 +206,7 @@ void Scenery3D::_ready()
 	add_child(water_manager);
 	water_manager->set_origin_east(origin_east);
 	water_manager->set_origin_north(origin_north);
+	water_manager->set_frame_mode(frame_mode);
 	water_manager->set_elevation_db(elevation_db);
 	water_manager->set_water_paths(water_paths);
 
@@ -213,6 +225,7 @@ void Scenery3D::_ready()
 	add_child(road_manager);
 	road_manager->set_origin_east(origin_east);
 	road_manager->set_origin_north(origin_north);
+	road_manager->set_frame_mode(frame_mode);
 	road_manager->set_elevation_db(elevation_db);
 	road_manager->set_road_paths(road_paths);
 }
@@ -228,6 +241,44 @@ double Scenery3D::get_elevation(double x, double z) const
 		return elevation_db->get_elevation(x, z);
 	}
 	return 0.0;
+}
+
+double Scenery3D::get_elevation_grid(double e, double n) const
+{
+	if (elevation_db.is_valid()) {
+		return elevation_db->get_elevation_grid(e, n);
+	}
+	return std::nan("");
+}
+
+double Scenery3D::get_elevation_geodetic(double latitude, double longitude) const
+{
+	const proj::EN en = proj::wgs84_to_lv95(latitude, longitude);
+	return get_elevation_grid(en.e, en.n);
+}
+
+double Scenery3D::get_elevation_world(Vector3 world_pos) const
+{
+	if (coords.is_valid()) {
+		const Vector3 lv = coords->world_to_lv95(world_pos);
+		return get_elevation_grid(lv.x, lv.y);
+	}
+	return get_elevation(world_pos.x, world_pos.z);
+}
+
+void Scenery3D::set_frame_mode(int p_mode)
+{
+	frame_mode = (p_mode == 1) ? 1 : 0;
+	if (tile_manager) tile_manager->set_frame_mode(frame_mode);
+	if (coords.is_valid()) coords->set_frame_mode(frame_mode);
+	if (building_manager) building_manager->set_frame_mode(frame_mode);
+	if (water_manager) water_manager->set_frame_mode(frame_mode);
+	if (road_manager) road_manager->set_frame_mode(frame_mode);
+}
+
+int Scenery3D::get_frame_mode() const
+{
+	return frame_mode;
 }
 
 Ref<S3DElevationDB> Scenery3D::get_elevation_db() const

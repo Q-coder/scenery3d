@@ -19,6 +19,7 @@
 #include <string>
 
 #include "s3d_elevation_db.h"
+#include "s3d_frame.h"
 
 namespace s3d
 {
@@ -207,6 +208,11 @@ namespace s3d
 
 		double origin_east = 2600000.0;
 		double origin_north = 1200000.0;
+		// World frame (flat legacy or ECEF, design §9.5); origin_* mirror
+		// into it. Tiles/chunks are placed through frame.place() /
+		// S3DTile::set_placement() and the camera is mapped to grid E/N
+		// through frame.world_to_grid().
+		S3DFrame frame;
 
 		// Tiles at this LOD or coarser discard their heightmap after meshing.
 		static constexpr int LOD_DISCARD_THRESHOLD = 4;
@@ -318,6 +324,11 @@ namespace s3d
 
 		void set_origin_north(double p_north);
 		double get_origin_north() const;
+
+		// 0 = flat legacy frame, 1 = ECEF (see S3DFrame).
+		void set_frame_mode(int p_mode);
+		int get_frame_mode() const { return frame.mode; }
+		const S3DFrame &get_frame() const { return frame; }
 
 		// Backward-compat single-path setters: route through orthophoto_paths.
 		void set_orthophoto_path(const godot::String &p_path);

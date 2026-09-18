@@ -8,6 +8,7 @@
 #include <godot_cpp/classes/ref.hpp>
 
 #include <unordered_map>
+#include "s3d_frame.h"
 #include <unordered_set>
 #include <vector>
 #include <deque>
@@ -133,6 +134,7 @@ namespace s3d
 		godot::PackedStringArray buildings_paths;
 		double origin_east = 2600000.0;
 		double origin_north = 1200000.0;
+		S3DFrame frame;  // world frame (flat legacy / ECEF), origin_* mirror into it
 		int load_radius_m = 8000;    // Distance in meters to load detailed buildings.
 		int far_radius_m = 30000;    // Distance for far-LOD boxes.
 		int unload_margin_m = 2000;  // Hysteresis margin.
@@ -184,6 +186,9 @@ namespace s3d
 
 		void set_origin_north(double p_north);
 		double get_origin_north() const;
+		// 0 = flat legacy frame, 1 = ECEF (see S3DFrame).
+		void set_frame_mode(int p_mode);
+		int get_frame_mode() const { return frame.mode; }
 
 		void set_load_radius_m(int p_radius);
 		int get_load_radius_m() const;

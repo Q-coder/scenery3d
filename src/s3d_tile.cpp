@@ -63,6 +63,14 @@ void S3DTile::generate_mesh()
 		return;
 	}
 
+	// Placement-dependent vertex mapping (see set_placement).
+	const bool curved_exact = placed && frame.ecef() && exact;
+	const bool curved_affine = placed && frame.ecef() && !exact;
+	const double cx_local = anchor_e - center_e;
+	const double cz_local = center_n - anchor_n;
+	const Basis exact_inv = exact_wun.basis.transposed();
+	const Basis exact_grid_basis = curved_exact ? frame.grid_basis_at(center_e, center_n) : Basis();
+
 	// Compute stride from LOD level. Higher LOD = coarser mesh. Clamp so a
 	// low-resolution tile still yields at least a 2x2 mesh: a 34 px Norway
 	// tile at LOD 6 (stride 64) otherwise produced NO mesh at all — an
@@ -167,7 +175,18 @@ void S3DTile::generate_mesh()
 			real_t world_z = static_cast<real_t>(gz) * spacing_z;
 			real_t height = sample_height_lod(px, py);
 
-			vertices[idx] = Vector3(world_x, height, world_z);
+			if (curved_exact) {
+				// Project this grid point onto the ellipsoid and express it
+				// in the WUN frame at the tile centre (node transform).
+				const double e = anchor_e - (double)world_x;
+				const double n = anchor_n + (double)world_z;
+				const Vector3 w = frame.grid_to_world(e, n, (double)height);
+				vertices[idx] = exact_inv.xform(w - exact_wun.origin) - Vector3(0.0, y_offset, 0.0);
+			} else if (curved_affine) {
+				vertices[idx] = Vector3(world_x, height - (real_t)frame.sag((double)world_x - cx_local, (double)world_z - cz_local), world_z);
+			} else {
+				vertices[idx] = Vector3(world_x, height, world_z);
+			}
 
 			// UV: [0,1] range across the tile.
 			real_t u = static_cast<real_t>(gx) / static_cast<real_t>(verts_x - 1);
@@ -192,6 +211,10 @@ void S3DTile::generate_mesh()
 				1.0,
 				(h_down - h_up) / dz
 			);
+			if (curved_exact) {
+				// Grid-space normal -> WUN-local (convergence/scale of the grid).
+				normal = exact_grid_basis.xform(normal);
+			}
 			normals[idx] = normal.normalized();
 		}
 	}
@@ -243,6 +266,25 @@ void S3DTile::generate_mesh()
 
 	set_mesh(array_mesh);
 	mesh_ready = true;
+}
+
+void S3DTile::set_placement(const S3DFrame &p_frame, double p_anchor_e, double p_anchor_n,
+	double p_center_e, double p_center_n, double p_y_offset, bool p_exact)
+{
+	frame = p_frame;
+	anchor_e = p_anchor_e;
+	anchor_n = p_anchor_n;
+	center_e = p_center_e;
+	center_n = p_center_n;
+	y_offset = p_y_offset;
+	exact = p_exact && frame.ecef();
+	placed = true;
+	if (exact) {
+		exact_wun = frame.wun_at(center_e, center_n);
+		set_transform(exact_wun * Transform3D(Basis(), Vector3(0.0, y_offset, 0.0)));
+	} else {
+		set_transform(frame.place(anchor_e, anchor_n, center_e, center_n, y_offset));
+	}
 }
 
 void S3DTile::set_heightmap(Ref<Image> p_heightmap)

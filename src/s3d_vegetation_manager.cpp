@@ -189,8 +189,9 @@ void S3DVegetationManager::load_manifests()
 
 void S3DVegetationManager::update_tiles(Vector3 camera_pos)
 {
-	double cam_e = origin_east - (double)camera_pos.x;
-	double cam_n = (double)camera_pos.z + origin_north;
+	const proj::EN cam_grid = frame.world_to_grid(camera_pos);
+	double cam_e = cam_grid.e;
+	double cam_n = cam_grid.n;
 	last_cam_e = cam_e;
 	last_cam_n = cam_n;
 
@@ -312,8 +313,9 @@ void S3DVegetationManager::process_load_results()
 		}
 		mm->set_instance_count((int)keep_indices.size());
 
-		double dx_world = origin_east - result.tile_east;
-		double dz_world = result.tile_north - origin_north;
+		// Tree records are flat offsets from the tile's SW corner (anchor);
+		// the tile root is placed with its centre on the ellipsoid.
+		const double half_tile = 512.0;
 
 		for (size_t k = 0; k < keep_indices.size(); k++) {
 			size_t i = keep_indices[k];
@@ -350,7 +352,8 @@ void S3DVegetationManager::process_load_results()
 		MultiMeshInstance3D *mmi = memnew(MultiMeshInstance3D);
 		mmi->set_name(String("vegetation_") + String(result.tile_id.c_str()));
 		mmi->set_multimesh(mm);
-		mmi->set_position(Vector3((float)dx_world, 0.0f, (float)dz_world));
+		mmi->set_transform(frame.place((double)result.tile_east, (double)result.tile_north,
+			(double)result.tile_east + half_tile, (double)result.tile_north + half_tile, 0.0));
 		// Disable tree shadow casting in the demo. Shadow receiving is handled on
 		// the foliage materials so terrain shadows do not over-darken the forest.
 		mmi->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_OFF);
@@ -407,6 +410,9 @@ void S3DVegetationManager::_bind_methods()
 	                     &S3DVegetationManager::get_origin_north);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "origin_north"),
 	             "set_origin_north", "get_origin_north");
+	ClassDB::bind_method(D_METHOD("set_frame_mode", "mode"), &S3DVegetationManager::set_frame_mode);
+	ClassDB::bind_method(D_METHOD("get_frame_mode"), &S3DVegetationManager::get_frame_mode);
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "frame_mode"), "set_frame_mode", "get_frame_mode");
 
 	ClassDB::bind_method(D_METHOD("set_load_radius_m", "radius"),
 	                     &S3DVegetationManager::set_load_radius_m);
@@ -457,9 +463,10 @@ PackedStringArray S3DVegetationManager::get_vegetation_paths() const { return ve
 void S3DVegetationManager::set_tree_mesh(const Ref<Mesh> &p_mesh) { tree_mesh = p_mesh; }
 Ref<Mesh> S3DVegetationManager::get_tree_mesh() const { return tree_mesh; }
 
-void S3DVegetationManager::set_origin_east(double v) { origin_east = v; }
+void S3DVegetationManager::set_origin_east(double v) { origin_east = v; frame.origin_east = v; }
 double S3DVegetationManager::get_origin_east() const { return origin_east; }
-void S3DVegetationManager::set_origin_north(double v) { origin_north = v; }
+void S3DVegetationManager::set_origin_north(double v) { origin_north = v; frame.origin_north = v; }
+void S3DVegetationManager::set_frame_mode(int p_mode) { frame.mode = (p_mode == S3DFrame::ECEF) ? S3DFrame::ECEF : S3DFrame::FLAT; }
 double S3DVegetationManager::get_origin_north() const { return origin_north; }
 
 void S3DVegetationManager::set_load_radius_m(int v) { load_radius_m = std::max(100, v); }

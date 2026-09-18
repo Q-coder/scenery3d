@@ -533,8 +533,9 @@ void S3DBuildingManager::_process(double delta)
 void S3DBuildingManager::update_buildings(Vector3 camera_pos)
 {
 	// Camera world position to LV95.
-	double cam_e = origin_east - camera_pos.x;
-	double cam_n = camera_pos.z + origin_north;
+	const proj::EN cam_grid = frame.world_to_grid(camera_pos);
+	double cam_e = cam_grid.e;
+	double cam_n = cam_grid.n;
 	last_cam_e = cam_e;
 	last_cam_n = cam_n;
 
@@ -721,9 +722,10 @@ void S3DBuildingManager::process_load_results()
 			Node3D *root = memnew(Node3D);
 			root->set_name(String("buildings_") + String(mit->second.raw_tile_id.c_str()));
 			add_child(root);
-			double dx = origin_east - mit->second.origin_e;
-			double dz = mit->second.origin_n - origin_north;
-			root->set_position(Vector3((float)dx, 0.0f, (float)dz));
+			// GLB vertices are flat offsets from the manifest's conversion
+			// origin; place the root so the tile centre sits on the ellipsoid.
+			root->set_transform(frame.place(mit->second.origin_e, mit->second.origin_n,
+				mit->second.center_e, mit->second.center_n, 0.0));
 			state.root_node = root;
 
 			for (auto &bld_data : result.buildings) {
@@ -796,9 +798,8 @@ void S3DBuildingManager::process_load_results()
 					far_mi->set_mesh(far_mesh);
 					far_mi->set_visible(false);
 					add_child(far_mi);
-					double dx = origin_east - mit->second.origin_e;
-					double dz = mit->second.origin_n - origin_north;
-					far_mi->set_position(Vector3((float)dx, 0.0f, (float)dz));
+					far_mi->set_transform(frame.place(mit->second.origin_e, mit->second.origin_n,
+						mit->second.center_e, mit->second.center_n, 0.0));
 					state.far_lod_node = far_mi;
 				}
 			}
@@ -885,6 +886,9 @@ void S3DBuildingManager::_bind_methods()
 	ClassDB::bind_method(D_METHOD("set_origin_north", "north"), &S3DBuildingManager::set_origin_north);
 	ClassDB::bind_method(D_METHOD("get_origin_north"), &S3DBuildingManager::get_origin_north);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "origin_north"), "set_origin_north", "get_origin_north");
+	ClassDB::bind_method(D_METHOD("set_frame_mode", "mode"), &S3DBuildingManager::set_frame_mode);
+	ClassDB::bind_method(D_METHOD("get_frame_mode"), &S3DBuildingManager::get_frame_mode);
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "frame_mode"), "set_frame_mode", "get_frame_mode");
 
 	ClassDB::bind_method(D_METHOD("set_load_radius_m", "radius"), &S3DBuildingManager::set_load_radius_m);
 	ClassDB::bind_method(D_METHOD("get_load_radius_m"), &S3DBuildingManager::get_load_radius_m);
@@ -944,10 +948,11 @@ String S3DBuildingManager::get_buildings_path() const
 	return buildings_paths.is_empty() ? String() : buildings_paths[0];
 }
 
-void S3DBuildingManager::set_origin_east(double p_east) { origin_east = p_east; }
+void S3DBuildingManager::set_origin_east(double p_east) { origin_east = p_east; frame.origin_east = p_east; }
 double S3DBuildingManager::get_origin_east() const { return origin_east; }
 
-void S3DBuildingManager::set_origin_north(double p_north) { origin_north = p_north; }
+void S3DBuildingManager::set_origin_north(double p_north) { origin_north = p_north; frame.origin_north = p_north; }
+void S3DBuildingManager::set_frame_mode(int p_mode) { frame.mode = (p_mode == S3DFrame::ECEF) ? S3DFrame::ECEF : S3DFrame::FLAT; }
 double S3DBuildingManager::get_origin_north() const { return origin_north; }
 
 void S3DBuildingManager::set_load_radius_m(int p_radius) { load_radius_m = p_radius; }

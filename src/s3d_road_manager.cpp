@@ -466,8 +466,9 @@ void S3DRoadManager::_process(double delta)
 
 void S3DRoadManager::update_tiles(Vector3 camera_pos)
 {
-	double cam_e = origin_east - camera_pos.x;
-	double cam_n = camera_pos.z + origin_north;
+	const proj::EN cam_grid = frame.world_to_grid(camera_pos);
+	double cam_e = cam_grid.e;
+	double cam_n = cam_grid.n;
 	last_cam_e = cam_e;
 	last_cam_n = cam_n;
 
@@ -574,12 +575,24 @@ void S3DRoadManager::process_load_results()
 		size_t colon = result.tile_id.find(':');
 		double dx = 0.0, dz = 0.0;
 		bool elevation_baked = false;
+		double anchor_e = origin_east, anchor_n = origin_north;
+		double center_e = origin_east, center_n = origin_north;
 		if (colon != std::string::npos) {
 			size_t gi = (size_t)std::stoul(result.tile_id.substr(0, colon));
 			if (gi < manifests.size()) {
-				dx = origin_east - manifests[gi].conv_origin_e;
-				dz = manifests[gi].conv_origin_n - origin_north;
+				anchor_e = manifests[gi].conv_origin_e;
+				anchor_n = manifests[gi].conv_origin_n;
+				dx = origin_east - anchor_e;
+				dz = anchor_n - origin_north;
 				elevation_baked = manifests[gi].elevation_baked;
+				auto eit = manifests[gi].entries.find(result.tile_id.substr(colon + 1));
+				if (eit != manifests[gi].entries.end()) {
+					center_e = eit->second.center_e;
+					center_n = eit->second.center_n;
+				} else {
+					center_e = anchor_e;
+					center_n = anchor_n;
+				}
 			}
 		}
 
@@ -589,6 +602,10 @@ void S3DRoadManager::process_load_results()
 		// When elevation is already baked into the GLB we skip all of this.
 		state.dx = dx;
 		state.dz = dz;
+		state.anchor_e = anchor_e;
+		state.anchor_n = anchor_n;
+		state.center_e = center_e;
+		state.center_n = center_n;
 		state.baked = result.surface;
 
 		Ref<ArrayMesh> mesh;
@@ -635,7 +652,8 @@ void S3DRoadManager::process_load_results()
 		} else {
 			root_y = (float)vertical_offset_m;
 		}
-		mi->set_position(Vector3((float)dx, root_y, (float)dz));
+		state.root_y = root_y;
+		mi->set_transform(frame.place(anchor_e, anchor_n, center_e, center_n, root_y));
 		add_child(mi);
 
 		state.node = mi;
@@ -687,11 +705,14 @@ bool S3DRoadManager::apply_drape(TileState &state, bool &out_fully_resolved)
 	int n_resolved = 0;
 	PackedFloat64Array sampled;
 	sampled.resize(vn);
+	// Grid-space DTM sampling + curvature sag about the tile centre (ECEF
+	// mode), matching the terrain tiles (see S3DWaterManager).
+	const double cx_local = state.anchor_e - state.center_e;
+	const double cz_local = state.center_n - state.anchor_n;
 	for (int i = 0; i < vn; i++) {
 		Vector3 v = verts[i];
-		double world_x = (double)v.x + state.dx;
-		double world_z = (double)v.z + state.dz;
-		double h = elevation_db->get_elevation(world_x, world_z);
+		double h = elevation_db->get_elevation_grid(state.anchor_e - (double)v.x, (double)v.z + state.anchor_n);
+		if (!std::isnan(h)) h -= frame.sag((double)v.x - cx_local, (double)v.z - cz_local);
 		sampled[i] = h;
 		if (!std::isnan(h)) {
 			sum_h += h;
@@ -703,13 +724,13 @@ bool S3DRoadManager::apply_drape(TileState &state, bool &out_fully_resolved)
 		state.drape_failures++;
 		if (!state.warned) {
 			state.warned = true;
-			double v0x = vn > 0 ? (double)verts[0].x + state.dx : 0;
-			double v0z = vn > 0 ? (double)verts[0].z + state.dz : 0;
-			int tx = (int)std::floor((elevation_db->get_origin_east() - v0x) / (double)elevation_db->get_tile_size());
-			int tz = (int)std::floor((v0z + elevation_db->get_origin_north()) / (double)elevation_db->get_tile_size());
+			double v0e = vn > 0 ? state.anchor_e - (double)verts[0].x : 0;
+			double v0n = vn > 0 ? (double)verts[0].z + state.anchor_n : 0;
+			int tx = (int)std::floor(v0e / (double)elevation_db->get_tile_size());
+			int tz = (int)std::floor(v0n / (double)elevation_db->get_tile_size());
 			bool has = elevation_db->has_tile(tx, tz);
 			UtilityFunctions::print("S3DRoadManager: drape pending, no DTM samples; vn=",
-				(int64_t)vn, " first world=(", v0x, ",", v0z, ") wants tile (", tx, ",", tz, ") has=", has);
+				(int64_t)vn, " first grid=(", v0e, ",", v0n, ") wants tile (", tx, ",", tz, ") has=", has);
 		}
 		// Fallback: after several failed retries, show the tile flat at the
 		// last-known terrain Y so it's at least visible. The tile stays
@@ -809,6 +830,9 @@ void S3DRoadManager::_bind_methods()
 	ClassDB::bind_method(D_METHOD("set_origin_north", "north"), &S3DRoadManager::set_origin_north);
 	ClassDB::bind_method(D_METHOD("get_origin_north"), &S3DRoadManager::get_origin_north);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "origin_north"), "set_origin_north", "get_origin_north");
+	ClassDB::bind_method(D_METHOD("set_frame_mode", "mode"), &S3DRoadManager::set_frame_mode);
+	ClassDB::bind_method(D_METHOD("get_frame_mode"), &S3DRoadManager::get_frame_mode);
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "frame_mode"), "set_frame_mode", "get_frame_mode");
 
 	ClassDB::bind_method(D_METHOD("set_load_radius_m", "radius"), &S3DRoadManager::set_load_radius_m);
 	ClassDB::bind_method(D_METHOD("get_load_radius_m"), &S3DRoadManager::get_load_radius_m);
@@ -848,10 +872,11 @@ void S3DRoadManager::set_road_paths(const PackedStringArray &p_paths)
 }
 PackedStringArray S3DRoadManager::get_road_paths() const { return road_paths; }
 
-void S3DRoadManager::set_origin_east(double p_east) { origin_east = p_east; }
+void S3DRoadManager::set_origin_east(double p_east) { origin_east = p_east; frame.origin_east = p_east; }
 double S3DRoadManager::get_origin_east() const { return origin_east; }
 
-void S3DRoadManager::set_origin_north(double p_north) { origin_north = p_north; }
+void S3DRoadManager::set_origin_north(double p_north) { origin_north = p_north; frame.origin_north = p_north; }
+void S3DRoadManager::set_frame_mode(int p_mode) { frame.mode = (p_mode == S3DFrame::ECEF) ? S3DFrame::ECEF : S3DFrame::FLAT; }
 double S3DRoadManager::get_origin_north() const { return origin_north; }
 
 void S3DRoadManager::set_load_radius_m(int p_radius) { load_radius_m = p_radius; }
@@ -879,12 +904,10 @@ void S3DRoadManager::set_baked_drop_m(double p_drop)
 	// only nudge tiles whose root is at/below zero to avoid disturbing the
 	// flat-offset fallback tiles.
 	for (auto &kv : tiles) {
-		if (kv.second.node) {
-			Vector3 pos = kv.second.node->get_position();
-			if (pos.y <= 0.0f) {
-				pos.y = -(float)baked_drop_m;
-				kv.second.node->set_position(pos);
-			}
+		TileState &st = kv.second;
+		if (st.node && st.root_y <= 0.0) {
+			st.root_y = -baked_drop_m;
+			st.node->set_transform(frame.place(st.anchor_e, st.anchor_n, st.center_e, st.center_n, st.root_y));
 		}
 	}
 }

@@ -23,6 +23,10 @@ void S3DCoords::_bind_methods()
 	ClassDB::bind_method(D_METHOD("set_origin_north", "north"), &S3DCoords::set_origin_north);
 	ClassDB::bind_method(D_METHOD("get_origin_north"), &S3DCoords::get_origin_north);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "origin_north"), "set_origin_north", "get_origin_north");
+	ClassDB::bind_method(D_METHOD("set_frame_mode", "mode"), &S3DCoords::set_frame_mode);
+	ClassDB::bind_method(D_METHOD("get_frame_mode"), &S3DCoords::get_frame_mode);
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "frame_mode"), "set_frame_mode", "get_frame_mode");
+	ClassDB::bind_method(D_METHOD("wgs84_to_world_h", "latitude", "longitude", "height"), &S3DCoords::wgs84_to_world_h);
 
 	ClassDB::bind_method(D_METHOD("set_origin_from_wgs84", "latitude", "longitude"), &S3DCoords::set_origin_from_wgs84);
 
@@ -39,6 +43,7 @@ void S3DCoords::_bind_methods()
 void S3DCoords::set_origin_east(double p_east)
 {
 	origin_east = p_east;
+	frame.origin_east = p_east;
 }
 
 double S3DCoords::get_origin_east() const
@@ -49,6 +54,7 @@ double S3DCoords::get_origin_east() const
 void S3DCoords::set_origin_north(double p_north)
 {
 	origin_north = p_north;
+	frame.origin_north = p_north;
 }
 
 double S3DCoords::get_origin_north() const
@@ -67,14 +73,26 @@ void S3DCoords::set_origin_from_wgs84(double latitude, double longitude)
 
 Vector3 S3DCoords::lv95_to_world(double east, double north, double elevation) const
 {
-	// +X = West, +Z = North (matching provpilot convention)
-	return Vector3(origin_east - east, elevation, north - origin_north);
+	// Flat: +X = West, +Z = North (provpilot convention); ECEF: on the ellipsoid.
+	return frame.grid_to_world(east, north, elevation);
 }
 
 Vector3 S3DCoords::world_to_lv95(Vector3 world_pos) const
 {
 	// Returns (East, North, Elevation).
-	return Vector3(origin_east - world_pos.x, world_pos.z + origin_north, world_pos.y);
+	const proj::EN en = frame.world_to_grid(world_pos);
+	return Vector3(en.e, en.n, frame.world_height(world_pos));
+}
+
+void S3DCoords::set_frame_mode(int p_mode)
+{
+	frame.mode = (p_mode == S3DFrame::ECEF) ? S3DFrame::ECEF : S3DFrame::FLAT;
+}
+
+Vector3 S3DCoords::wgs84_to_world_h(double latitude, double longitude, double height) const
+{
+	const proj::EN en = proj::wgs84_to_lv95(latitude, longitude);
+	return frame.grid_to_world(en.e, en.n, height);
 }
 
 // ---- WGS84 <-> LV95 (rigorous, see s3d_proj.h) ----

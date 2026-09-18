@@ -8,6 +8,7 @@
 #include <godot_cpp/classes/ref.hpp>
 
 #include <unordered_map>
+#include "s3d_frame.h"
 #include <unordered_set>
 #include <vector>
 #include <deque>
@@ -86,6 +87,7 @@ namespace s3d
 		godot::Ref<godot::Mesh> tree_mesh;          // The mesh used per instance.
 		double origin_east = 2600000.0;
 		double origin_north = 1200000.0;
+		S3DFrame frame;  // world frame (flat legacy / ECEF), origin_* mirror into it
 		int load_radius_m = 4000;
 		int unload_margin_m = 1000;
 		double scale_jitter = 0.20;   // ±20 % per-instance scale jitter.
@@ -132,6 +134,8 @@ namespace s3d
 		double get_origin_east() const;
 		void set_origin_north(double p_north);
 		double get_origin_north() const;
+		void set_frame_mode(int p_mode);
+		int get_frame_mode() const { return frame.mode; }
 
 		void set_load_radius_m(int p_r);
 		int get_load_radius_m() const;

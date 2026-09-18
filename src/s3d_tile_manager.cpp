@@ -833,13 +833,18 @@ void S3DTileManager::process_load_results(int &verts_generated)
 
 				int base_ei = result.ei * chunk_size;
 				int base_ni = result.ni * chunk_size;
-				double world_x = origin_east - (double)(base_ei + chunk_size) * tile_size;
-				double world_z = (double)base_ni * tile_size - origin_north;
-				// Sink chunks slightly below individual tiles so where the
-				// two overlap the near terrain wins the depth test cleanly.
-				// Chunks sample every ~250 m so their surface can otherwise
-				// protrude above the detailed tile mesh along ridgelines.
-				tile->set_position(Vector3(world_x, CHUNK_Y_BIAS, world_z));
+				// Sink chunks slightly below individual tiles (along local up)
+				// so where the two overlap the near terrain wins the depth
+				// test cleanly. Chunks sample every ~250 m so their surface
+				// can otherwise protrude above the detailed tile mesh along
+				// ridgelines. In ECEF mode chunks are placed EXACTLY (every
+				// vertex projected) — an 8 km affine tile would sag 1.25 m
+				// and its seams would mismatch by ~1 m far from the CRS origin.
+				const double ts = (double)tile_size;
+				tile->set_placement(frame,
+					(double)(base_ei + chunk_size) * ts, (double)base_ni * ts,
+					((double)base_ei + 0.5 * chunk_size) * ts, ((double)base_ni + 0.5 * chunk_size) * ts,
+					CHUNK_Y_BIAS, frame.ecef());
 
 				add_child(tile);
 				state.node = tile;
@@ -917,9 +922,11 @@ void S3DTileManager::process_load_results(int &verts_generated)
 			tile->set_tile_size(result.tile_size);
 			tile->set_material(shared_material);
 
-			double world_x = origin_east - (double)(result.ei + 1) * tile_size;
-			double world_z = (double)result.ni * tile_size - origin_north;
-			tile->set_position(Vector3(world_x, 0.0, world_z));
+			const double ts = (double)tile_size;
+			tile->set_placement(frame,
+				(double)(result.ei + 1) * ts, (double)result.ni * ts,
+				((double)result.ei + 0.5) * ts, ((double)result.ni + 0.5) * ts,
+				0.0, false);
 
 			add_child(tile);
 			state.node = tile;
@@ -1076,6 +1083,10 @@ void S3DTileManager::_bind_methods()
 	ClassDB::bind_method(D_METHOD("get_origin_north"), &S3DTileManager::get_origin_north);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "origin_north"), "set_origin_north", "get_origin_north");
 
+	ClassDB::bind_method(D_METHOD("set_frame_mode", "mode"), &S3DTileManager::set_frame_mode);
+	ClassDB::bind_method(D_METHOD("get_frame_mode"), &S3DTileManager::get_frame_mode);
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "frame_mode"), "set_frame_mode", "get_frame_mode");
+
 	ClassDB::bind_method(D_METHOD("set_orthophoto_path", "path"), &S3DTileManager::set_orthophoto_path);
 	ClassDB::bind_method(D_METHOD("get_orthophoto_path"), &S3DTileManager::get_orthophoto_path);
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "orthophoto_path"), "set_orthophoto_path", "get_orthophoto_path");
@@ -1113,10 +1124,11 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 {
 	if (lod_rings.empty()) return;
 
-	// Convert camera world position to LV95 tile indices.
-	// +X = West, so LV95_E = origin_east - camera_pos.x
-	double cam_lv95_e = origin_east - camera_pos.x;
-	double cam_lv95_n = camera_pos.z + origin_north;
+	// Convert camera world position to grid (LV95) tile indices through the
+	// world frame (flat: origin offset; ECEF: geodetic + CRS forward).
+	const proj::EN cam_grid = frame.world_to_grid(camera_pos);
+	double cam_lv95_e = cam_grid.e;
+	double cam_lv95_n = cam_grid.n;
 	int cam_ei = (int)std::floor(cam_lv95_e / (double)tile_size);
 	int cam_ni = (int)std::floor(cam_lv95_n / (double)tile_size);
 
@@ -1742,6 +1754,7 @@ PackedStringArray S3DTileManager::get_data_paths() const
 void S3DTileManager::set_origin_east(double p_east)
 {
 	origin_east = p_east;
+	frame.origin_east = p_east;
 }
 
 double S3DTileManager::get_origin_east() const
@@ -1752,6 +1765,12 @@ double S3DTileManager::get_origin_east() const
 void S3DTileManager::set_origin_north(double p_north)
 {
 	origin_north = p_north;
+	frame.origin_north = p_north;
+}
+
+void S3DTileManager::set_frame_mode(int p_mode)
+{
+	frame.mode = (p_mode == S3DFrame::ECEF) ? S3DFrame::ECEF : S3DFrame::FLAT;
 }
 
 double S3DTileManager::get_origin_north() const

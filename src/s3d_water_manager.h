@@ -10,6 +10,7 @@
 #include <godot_cpp/classes/ref.hpp>
 
 #include "s3d_elevation_db.h"
+#include "s3d_frame.h"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -48,6 +49,12 @@ namespace s3d
 			SurfaceData baked;
 			double dx = 0.0;
 			double dz = 0.0;
+			// Placement (see S3DFrame::place): vertices are flat offsets from
+			// the manifest conversion origin (anchor); the tile is centred on
+			// center_*; root_y is the local-up offset the root was placed with.
+			double anchor_e = 0.0, anchor_n = 0.0;
+			double center_e = 0.0, center_n = 0.0;
+			double root_y = 0.0;
 			bool drape_pending = false;
 			bool loading = false;
 			bool loaded = false;
@@ -121,6 +128,7 @@ namespace s3d
 		godot::PackedStringArray water_paths;
 		double origin_east = 2600000.0;
 		double origin_north = 1200000.0;
+		S3DFrame frame;  // world frame (flat legacy / ECEF), origin_* mirror into it
 		int load_radius_m = 8000;
 		int far_radius_m = 50000;    // Lakes/river polygons visible at distance.
 		int unload_margin_m = 2000;
@@ -187,6 +195,9 @@ namespace s3d
 
 		void set_origin_north(double p_north);
 		double get_origin_north() const;
+		// 0 = flat legacy frame, 1 = ECEF (see S3DFrame).
+		void set_frame_mode(int p_mode);
+		int get_frame_mode() const { return frame.mode; }
 
 		void set_load_radius_m(int p_radius);
 		int get_load_radius_m() const;

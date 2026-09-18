@@ -8,6 +8,7 @@
 #include <godot_cpp/classes/ref.hpp>
 
 #include "s3d_elevation_db.h"
+#include "s3d_frame.h"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -46,6 +47,10 @@ namespace s3d
 			SurfaceData baked;     // pristine vertices for re-drape
 			double dx = 0.0;       // cached LV95 origin offset
 			double dz = 0.0;
+			// Placement (see S3DFrame::place); root_y is the local-up offset.
+			double anchor_e = 0.0, anchor_n = 0.0;
+			double center_e = 0.0, center_n = 0.0;
+			double root_y = 0.0;
 			bool drape_pending = false;
 			bool loading = false;
 			bool loaded = false;
@@ -107,6 +112,7 @@ namespace s3d
 		godot::PackedStringArray road_paths;
 		double origin_east = 2600000.0;
 		double origin_north = 1200000.0;
+		S3DFrame frame;  // world frame (flat legacy / ECEF), origin_* mirror into it
 		// Roads are baked at full-resolution terrain height. Beyond ~8 km the
 		// visible terrain mesh drops to coarse LOD and dips below the baked
 		// road Y, so the roads visibly float (a grey band at the horizon).
@@ -182,6 +188,9 @@ namespace s3d
 
 		void set_origin_north(double p_north);
 		double get_origin_north() const;
+		// 0 = flat legacy frame, 1 = ECEF (see S3DFrame).
+		void set_frame_mode(int p_mode);
+		int get_frame_mode() const { return frame.mode; }
 
 		void set_load_radius_m(int p_radius);
 		int get_load_radius_m() const;
