@@ -1053,9 +1053,10 @@ void S3DTileManager::_bind_methods()
 	ClassDB::bind_method(D_METHOD("get_unload_margin"), &S3DTileManager::get_unload_margin);
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "unload_margin"), "set_unload_margin", "get_unload_margin");
 
-	ClassDB::bind_method(D_METHOD("get_coverage_grid", "radius_cells"), &S3DTileManager::get_coverage_grid);
-	ClassDB::bind_method(D_METHOD("get_cam_chunk_ei"), &S3DTileManager::get_cam_chunk_ei);
-	ClassDB::bind_method(D_METHOD("get_cam_chunk_ni"), &S3DTileManager::get_cam_chunk_ni);
+	ClassDB::bind_method(D_METHOD("get_coverage_mask"), &S3DTileManager::get_coverage_mask);
+	ClassDB::bind_method(D_METHOD("get_coverage_mask_radius"), &S3DTileManager::get_coverage_mask_radius);
+	ClassDB::bind_method(D_METHOD("get_cam_tile_ei"), &S3DTileManager::get_cam_tile_ei);
+	ClassDB::bind_method(D_METHOD("get_cam_tile_ni"), &S3DTileManager::get_cam_tile_ni);
 	ClassDB::bind_method(D_METHOD("get_chunk_size"), &S3DTileManager::get_chunk_size);
 	ClassDB::bind_method(D_METHOD("get_coverage_generation"), &S3DTileManager::get_coverage_generation);
 
@@ -1119,7 +1120,7 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 	int cam_ei = (int)std::floor(cam_lv95_e / (double)tile_size);
 	int cam_ni = (int)std::floor(cam_lv95_n / (double)tile_size);
 
-	// Remember for the coverage query (get_coverage_grid is centred on this).
+	// Remember for the coverage query (get_coverage_mask is centred on this).
 	last_cam_ei = cam_ei;
 	last_cam_ni = cam_ni;
 	if (chunk_size >= 1) {
@@ -1608,43 +1609,45 @@ void S3DTileManager::bump_coverage()
 	coverage_generation++;
 }
 
-bool S3DTileManager::cell_covered(int cg_ei, int cg_ni) const
+PackedByteArray S3DTileManager::get_coverage_mask() const
 {
-	// Far zone: a resident chunk mesh spans the whole cell. (A failed chunk
-	// stays in the map with no_data set and node == null — not covered, so
-	// the coarse globe fills that cell instead of leaving a hole.)
-	auto cit = chunks.find(tile_key(cg_ei, cg_ni));
-	if (cit != chunks.end() && cit->second.node) {
-		return true;
-	}
-	// Close ring (and cells straddling the ring boundary while their chunk is
-	// still loading): every sub-tile must have a mesh. A tile mid-LOD-reload
-	// keeps its old node, so node != null is exactly "geometry present".
-	int base_ei = cg_ei * chunk_size;
-	int base_ni = cg_ni * chunk_size;
-	for (int dy = 0; dy < chunk_size; dy++) {
-		for (int dx = 0; dx < chunk_size; dx++) {
-			auto it = tiles.find(tile_key(base_ei + dx, base_ni + dy));
-			if (it == tiles.end() || !it->second.node) {
-				return false;
+	const int r = get_coverage_mask_radius();
+	const int n = 2 * r + 1;
+	PackedByteArray out;
+	out.resize((int64_t)n * n);
+	out.fill(0);
+	uint8_t *w = out.ptrw();
+	const int e_min = last_cam_ei - r;
+	const int n_min = last_cam_ni - r;
+	auto stamp = [&](int ei, int ni) {
+		const int ie = ei - e_min;
+		const int in = ni - n_min;
+		if (ie >= 0 && ie < n && in >= 0 && in < n) {
+			w[(int64_t)in * n + ie] = 255;
+		}
+	};
+	// Far zone: a resident chunk mesh spans its whole footprint (partial
+	// chunks are gap-filled at bake time, so the geometry really is there).
+	// A failed chunk stays in the map with no_data set and node == null —
+	// not covered, so the coarse globe fills it instead of leaving a hole.
+	if (chunk_size >= 1) {
+		for (const auto &[key, state] : chunks) {
+			if (!state.node) continue;
+			const int cg_ei = (int)(int32_t)(key >> 32);
+			const int cg_ni = (int)(int32_t)(key & 0xFFFFFFFF);
+			for (int dy = 0; dy < chunk_size; dy++) {
+				for (int dx = 0; dx < chunk_size; dx++) {
+					stamp(cg_ei * chunk_size + dx, cg_ni * chunk_size + dy);
+				}
 			}
 		}
 	}
-	return true;
-}
-
-PackedInt32Array S3DTileManager::get_coverage_grid(int radius_cells) const
-{
-	PackedInt32Array out;
-	int r = MAX(0, radius_cells);
-	int n = 2 * r + 1;
-	out.resize(n * n);
-	for (int dng = -r; dng <= r; dng++) {
-		for (int deg = -r; deg <= r; deg++) {
-			int cg_ei = last_cam_cg_ei + deg;
-			int cg_ni = last_cam_cg_ni + dng;
-			out[(dng + r) * n + (deg + r)] = cell_covered(cg_ei, cg_ni) ? 1 : 0;
-		}
+	// Individual tiles (close ring, and stale far tiles still waiting for
+	// their chunk). A tile mid-LOD-reload keeps its old node, so node != null
+	// is exactly "geometry present"; a no_data tile has none and stays 0.
+	for (const auto &[key, state] : tiles) {
+		if (!state.node) continue;
+		stamp((int)(int32_t)(key >> 32), (int)(int32_t)(key & 0xFFFFFFFF));
 	}
 	return out;
 }

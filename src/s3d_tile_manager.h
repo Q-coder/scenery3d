@@ -187,8 +187,8 @@ namespace s3d
 		// Coverage-query state for the coarse-globe suppression pass (Phase 2):
 		// last camera tile / chunk-grid indices from update_tiles(), and a
 		// generation counter that bumps whenever resident geometry appears or
-		// disappears, so the host rebuilds its suppression rectangles only
-		// when coverage actually changed.
+		// disappears, so the host rebuilds its suppression mask only when
+		// coverage actually changed.
 		int last_cam_ei = 0;
 		int last_cam_ni = 0;
 		int last_cam_cg_ei = 0;
@@ -255,7 +255,6 @@ namespace s3d
 		void bump_coverage();
 		// A chunk-aligned cell is covered when its far-zone chunk is resident,
 		// or every sub-tile in it has a mesh (close-ring cells have no chunk).
-		bool cell_covered(int cg_ei, int cg_ni) const;
 
 	protected:
 		static void _bind_methods();
@@ -289,20 +288,23 @@ namespace s3d
 		void set_unload_margin(int p_margin);
 		int get_unload_margin() const;
 
-		// --- Coverage query for the coarse-globe suppression pass (Phase 2) ---
-		// 0/1 grid, row-major, (2*radius_cells+1)^2 entries: one bit per
-		// chunk-aligned cell (chunk_size x chunk_size tiles) in a square around
-		// the camera's chunk cell; 1 = fully covered by resident geometry
-		// (loaded far-zone chunk, or every close-ring tile in the cell). The
-		// host merges covered cells into rectangles and suppresses the coarse
-		// globe only there — unloaded cells keep the globe visible instead of
-		// leaving holes to space while the streamer catches up.
-		godot::PackedInt32Array get_coverage_grid(int radius_cells) const;
-		int get_cam_chunk_ei() const { return last_cam_cg_ei; }
-		int get_cam_chunk_ni() const { return last_cam_cg_ni; }
+		// --- Coverage mask for the coarse-globe suppression pass (Phase 2) ---
+		// One byte per TILE (tile_size metres), row-major, (2r+1)^2 entries
+		// with r = get_coverage_mask_radius(), centred on the camera tile
+		// (get_cam_tile_ei/ni): 255 where resident geometry covers the tile
+		// (a loaded far-zone chunk stamps its whole chunk_size x chunk_size
+		// footprint; a loaded individual tile stamps itself), 0 elsewhere. The
+		// host uploads it verbatim as the globe's per-fragment mask, so the
+		// globe is hidden exactly under resident geometry and stays visible in
+		// unloaded / no-data tiles (no holes to space, no poke-through next to
+		// a no-data tile at a region's data edge).
+		godot::PackedByteArray get_coverage_mask() const;
+		int get_coverage_mask_radius() const { return far_radius + unload_margin + chunk_size; }
+		int get_cam_tile_ei() const { return last_cam_ei; }
+		int get_cam_tile_ni() const { return last_cam_ni; }
 		int get_chunk_size() const { return chunk_size; }
 		// Bumps whenever resident geometry appears or disappears, so the host
-		// can refresh its suppression rectangles only on actual changes.
+		// can refresh its suppression mask only on actual changes.
 		int get_coverage_generation() const { return (int)coverage_generation; }
 
 		void set_data_path(const godot::String &p_path);
