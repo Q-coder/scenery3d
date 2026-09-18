@@ -61,6 +61,9 @@ namespace s3d
 
 		// Access the elevation database directly (e.g. for JSBSim integration).
 		godot::Ref<S3DElevationDB> get_elevation_db() const;
+		// The terrain tile manager (child node). Hosts query its live
+		// coverage grid for the coarse-globe suppression pass.
+		S3DTileManager *get_tile_manager() const;
 
 		godot::Ref<S3DCoords> get_coords() const;
 

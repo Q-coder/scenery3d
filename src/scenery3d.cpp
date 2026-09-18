@@ -26,6 +26,7 @@ void Scenery3D::_bind_methods()
 {
 	ClassDB::bind_method(D_METHOD("get_elevation", "x", "z"), &Scenery3D::get_elevation);
 	ClassDB::bind_method(D_METHOD("get_elevation_db"), &Scenery3D::get_elevation_db);
+	ClassDB::bind_method(D_METHOD("get_tile_manager"), &Scenery3D::get_tile_manager);
 	ClassDB::bind_method(D_METHOD("get_coords"), &Scenery3D::get_coords);
 
 	ClassDB::bind_method(D_METHOD("set_tile_size", "size"), &Scenery3D::set_tile_size);
@@ -232,6 +233,11 @@ double Scenery3D::get_elevation(double x, double z) const
 Ref<S3DElevationDB> Scenery3D::get_elevation_db() const
 {
 	return elevation_db;
+}
+
+S3DTileManager *Scenery3D::get_tile_manager() const
+{
+	return tile_manager;
 }
 
 Ref<S3DCoords> Scenery3D::get_coords() const

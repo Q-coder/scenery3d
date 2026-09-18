@@ -843,6 +843,7 @@ void S3DTileManager::process_load_results(int &verts_generated)
 
 				add_child(tile);
 				state.node = tile;
+				bump_coverage();
 			}
 
 			state.node->set_heightmap(heightmap);
@@ -922,6 +923,7 @@ void S3DTileManager::process_load_results(int &verts_generated)
 
 			add_child(tile);
 			state.node = tile;
+			bump_coverage();
 		}
 
 		// (Re)build the ortho material every time we get fresh JPEG bytes.
@@ -1051,6 +1053,12 @@ void S3DTileManager::_bind_methods()
 	ClassDB::bind_method(D_METHOD("get_unload_margin"), &S3DTileManager::get_unload_margin);
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "unload_margin"), "set_unload_margin", "get_unload_margin");
 
+	ClassDB::bind_method(D_METHOD("get_coverage_grid", "radius_cells"), &S3DTileManager::get_coverage_grid);
+	ClassDB::bind_method(D_METHOD("get_cam_chunk_ei"), &S3DTileManager::get_cam_chunk_ei);
+	ClassDB::bind_method(D_METHOD("get_cam_chunk_ni"), &S3DTileManager::get_cam_chunk_ni);
+	ClassDB::bind_method(D_METHOD("get_chunk_size"), &S3DTileManager::get_chunk_size);
+	ClassDB::bind_method(D_METHOD("get_coverage_generation"), &S3DTileManager::get_coverage_generation);
+
 	ClassDB::bind_method(D_METHOD("set_data_path", "path"), &S3DTileManager::set_data_path);
 	ClassDB::bind_method(D_METHOD("get_data_path"), &S3DTileManager::get_data_path);
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "data_path"), "set_data_path", "get_data_path");
@@ -1110,6 +1118,18 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 	double cam_lv95_n = camera_pos.z + origin_north;
 	int cam_ei = (int)std::floor(cam_lv95_e / (double)tile_size);
 	int cam_ni = (int)std::floor(cam_lv95_n / (double)tile_size);
+
+	// Remember for the coverage query (get_coverage_grid is centred on this).
+	last_cam_ei = cam_ei;
+	last_cam_ni = cam_ni;
+	if (chunk_size >= 1) {
+		last_cam_cg_ei = (cam_ei >= 0)
+			? cam_ei / chunk_size
+			: (cam_ei - chunk_size + 1) / chunk_size;
+		last_cam_cg_ni = (cam_ni >= 0)
+			? cam_ni / chunk_size
+			: (cam_ni - chunk_size + 1) / chunk_size;
+	}
 
 	int max_radius = lod_rings.back().radius;
 
@@ -1211,6 +1231,7 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 					elevation_db->unload_tile(state.node->get_tile_x(), state.node->get_tile_z());
 				}
 				state.node->queue_free();
+				bump_coverage();
 			}
 			tiles.erase(it);
 		}
@@ -1554,6 +1575,7 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 		if (it != chunks.end()) {
 			if (it->second.node) {
 				it->second.node->queue_free();
+				bump_coverage();
 			}
 			chunks.erase(it);
 		}
@@ -1579,6 +1601,52 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 int S3DTileManager::get_active_tile_count() const
 {
 	return (int)tiles.size() + (int)chunks.size();
+}
+
+void S3DTileManager::bump_coverage()
+{
+	coverage_generation++;
+}
+
+bool S3DTileManager::cell_covered(int cg_ei, int cg_ni) const
+{
+	// Far zone: a resident chunk mesh spans the whole cell. (A failed chunk
+	// stays in the map with no_data set and node == null — not covered, so
+	// the coarse globe fills that cell instead of leaving a hole.)
+	auto cit = chunks.find(tile_key(cg_ei, cg_ni));
+	if (cit != chunks.end() && cit->second.node) {
+		return true;
+	}
+	// Close ring (and cells straddling the ring boundary while their chunk is
+	// still loading): every sub-tile must have a mesh. A tile mid-LOD-reload
+	// keeps its old node, so node != null is exactly "geometry present".
+	int base_ei = cg_ei * chunk_size;
+	int base_ni = cg_ni * chunk_size;
+	for (int dy = 0; dy < chunk_size; dy++) {
+		for (int dx = 0; dx < chunk_size; dx++) {
+			auto it = tiles.find(tile_key(base_ei + dx, base_ni + dy));
+			if (it == tiles.end() || !it->second.node) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+PackedInt32Array S3DTileManager::get_coverage_grid(int radius_cells) const
+{
+	PackedInt32Array out;
+	int r = MAX(0, radius_cells);
+	int n = 2 * r + 1;
+	out.resize(n * n);
+	for (int dng = -r; dng <= r; dng++) {
+		for (int deg = -r; deg <= r; deg++) {
+			int cg_ei = last_cam_cg_ei + deg;
+			int cg_ni = last_cam_cg_ni + dng;
+			out[(dng + r) * n + (deg + r)] = cell_covered(cg_ei, cg_ni) ? 1 : 0;
+		}
+	}
+	return out;
 }
 
 void S3DTileManager::set_tile_size(int p_size)

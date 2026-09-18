@@ -5,6 +5,7 @@
 #include <godot_cpp/classes/ref.hpp>
 #include <godot_cpp/classes/standard_material3d.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
+#include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/packed_string_array.hpp>
 
 #include <unordered_map>
@@ -183,6 +184,16 @@ namespace s3d
 		int chunk_size = 8;
 		int load_budget = 4;
 		int unload_margin = 2;
+		// Coverage-query state for the coarse-globe suppression pass (Phase 2):
+		// last camera tile / chunk-grid indices from update_tiles(), and a
+		// generation counter that bumps whenever resident geometry appears or
+		// disappears, so the host rebuilds its suppression rectangles only
+		// when coverage actually changed.
+		int last_cam_ei = 0;
+		int last_cam_ni = 0;
+		int last_cam_cg_ei = 0;
+		int last_cam_cg_ni = 0;
+		uint64_t coverage_generation = 0;
 		// Ordered list of directories to search for tile files.
 		// The first entry is returned by get_data_path() for backward compat.
 		godot::PackedStringArray data_paths;
@@ -240,6 +251,12 @@ namespace s3d
 		void worker_func();
 		void process_load_results(int &verts_generated);
 
+		// Bump the coverage generation (resident geometry appeared/gone).
+		void bump_coverage();
+		// A chunk-aligned cell is covered when its far-zone chunk is resident,
+		// or every sub-tile in it has a mesh (close-ring cells have no chunk).
+		bool cell_covered(int cg_ei, int cg_ni) const;
+
 	protected:
 		static void _bind_methods();
 
@@ -271,6 +288,22 @@ namespace s3d
 
 		void set_unload_margin(int p_margin);
 		int get_unload_margin() const;
+
+		// --- Coverage query for the coarse-globe suppression pass (Phase 2) ---
+		// 0/1 grid, row-major, (2*radius_cells+1)^2 entries: one bit per
+		// chunk-aligned cell (chunk_size x chunk_size tiles) in a square around
+		// the camera's chunk cell; 1 = fully covered by resident geometry
+		// (loaded far-zone chunk, or every close-ring tile in the cell). The
+		// host merges covered cells into rectangles and suppresses the coarse
+		// globe only there — unloaded cells keep the globe visible instead of
+		// leaving holes to space while the streamer catches up.
+		godot::PackedInt32Array get_coverage_grid(int radius_cells) const;
+		int get_cam_chunk_ei() const { return last_cam_cg_ei; }
+		int get_cam_chunk_ni() const { return last_cam_cg_ni; }
+		int get_chunk_size() const { return chunk_size; }
+		// Bumps whenever resident geometry appears or disappears, so the host
+		// can refresh its suppression rectangles only on actual changes.
+		int get_coverage_generation() const { return (int)coverage_generation; }
 
 		void set_data_path(const godot::String &p_path);
 		godot::String get_data_path() const;
