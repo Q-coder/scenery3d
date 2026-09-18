@@ -68,14 +68,25 @@ namespace proj
 		const double e2 = ell.e2();
 		const double lon = std::atan2(p.y, p.x);
 		const double r = std::hypot(p.x, p.y);
+		// Degenerate input (at/near the Earth's centre, or non-finite):
+		// return a finite answer instead of NaN so callers never propagate
+		// NaN into normalize() etc. h = -a marks "not on the planet".
+		if (!(std::hypot(r, p.z) > 1.0))
+		{
+			if (h_out) *h_out = -ell.a;
+			return LatLon{0.0, 0.0};
+		}
 		double lat = std::atan2(p.z, r * (1.0 - e2)); // initial guess
 		double N = ell.a, h = 0.0;
 		for (int i = 0; i < 8; ++i)
 		{
 			const double s = std::sin(lat);
 			N = ell.a / std::sqrt(1.0 - e2 * s * s);
-			h = r / std::cos(lat) - N;
-			const double next = std::atan2(p.z, r * (1.0 - e2 * N / (N + h)));
+			const double c = std::cos(lat);
+			h = (std::fabs(c) > 1e-12) ? r / c - N : std::fabs(p.z) / std::fabs(std::sin(lat)) - N * (1.0 - e2);
+			const double denom = N + h;
+			const double k = (std::fabs(denom) > 1e-6) ? e2 * N / denom : 0.0;
+			const double next = std::atan2(p.z, r * (1.0 - k));
 			if (std::fabs(next - lat) < 1e-14)
 			{
 				lat = next;
