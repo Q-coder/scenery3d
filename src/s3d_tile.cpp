@@ -238,15 +238,20 @@ void S3DTile::generate_mesh()
 			int bottom_left = (gz + 1) * verts_x + gx;
 			int bottom_right = bottom_left + 1;
 
-			// First triangle (top-left, bottom-left, top-right).
+			// Godot's front face is CLOCKWISE. Seen from above (+Y) these two
+			// triangles must wind clockwise, or the double-sided material treats
+			// the terrain as back faces and flips its normals: the sun then never
+			// lights it (only the ambient floor did, which is why the patch went
+			// black from space where the ambient is dimmed — 2026-09-18).
+			// First triangle (top-left, top-right, bottom-left).
 			indices[ii++] = top_left;
-			indices[ii++] = bottom_left;
 			indices[ii++] = top_right;
+			indices[ii++] = bottom_left;
 
-			// Second triangle (top-right, bottom-left, bottom-right).
+			// Second triangle (top-right, bottom-right, bottom-left).
 			indices[ii++] = top_right;
-			indices[ii++] = bottom_left;
 			indices[ii++] = bottom_right;
+			indices[ii++] = bottom_left;
 		}
 	}
 
