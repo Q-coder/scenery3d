@@ -1632,7 +1632,7 @@ PackedByteArray S3DTileManager::get_coverage_mask() const
 	// not covered, so the coarse globe fills it instead of leaving a hole.
 	if (chunk_size >= 1) {
 		for (const auto &[key, state] : chunks) {
-			if (!state.node) continue;
+			if (!state.node || state.node->get_mesh().is_null()) continue;
 			const int cg_ei = (int)(int32_t)(key >> 32);
 			const int cg_ni = (int)(int32_t)(key & 0xFFFFFFFF);
 			for (int dy = 0; dy < chunk_size; dy++) {
@@ -1643,10 +1643,11 @@ PackedByteArray S3DTileManager::get_coverage_mask() const
 		}
 	}
 	// Individual tiles (close ring, and stale far tiles still waiting for
-	// their chunk). A tile mid-LOD-reload keeps its old node, so node != null
-	// is exactly "geometry present"; a no_data tile has none and stays 0.
+	// their chunk). A tile mid-LOD-reload keeps its old node and mesh, so
+	// "node with a mesh" is exactly "geometry drawn"; a no_data tile has
+	// none and stays 0, and so does a node whose generate_mesh() bailed.
 	for (const auto &[key, state] : tiles) {
-		if (!state.node) continue;
+		if (!state.node || state.node->get_mesh().is_null()) continue;
 		stamp((int)(int32_t)(key >> 32), (int)(int32_t)(key & 0xFFFFFFFF));
 	}
 	return out;

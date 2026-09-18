@@ -63,8 +63,15 @@ void S3DTile::generate_mesh()
 		return;
 	}
 
-	// Compute stride from LOD level. Higher LOD = coarser mesh.
+	// Compute stride from LOD level. Higher LOD = coarser mesh. Clamp so a
+	// low-resolution tile still yields at least a 2x2 mesh: a 34 px Norway
+	// tile at LOD 6 (stride 64) otherwise produced NO mesh at all — an
+	// invisible tile the far chunk had already been dropped for, i.e. a hole
+	// (seen as sky through the suppressed globe south of Oslo, 2026-09-18).
 	int stride = 1 << lod_level;
+	if (stride > img_w - 1) stride = img_w - 1;
+	if (stride > img_h - 1) stride = img_h - 1;
+	if (stride < 1) stride = 1;
 
 	// Number of vertices along each axis after applying stride.
 	int verts_x = (img_w - 1) / stride + 1;

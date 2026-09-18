@@ -8,8 +8,8 @@ namespace s3d
 {
 
 	// Converts between WGS84 (latitude/longitude), Swiss LV95/CH1903+ (EPSG:2056),
-	// and Godot world coordinates. Uses the official SwissTopo approximate formulas
-	// (accuracy ~1m, sufficient for terrain rendering).
+	// and Godot world coordinates. Uses the rigorous projection in s3d_proj.h
+	// (matches pyproj EPSG:2056 to the millimetre across Europe).
 	//
 	// Godot mapping:
 	//   X = LV95 East  - origin_east   (positive = east)

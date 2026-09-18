@@ -1,4 +1,5 @@
 #include "s3d_coords.h"
+#include "s3d_proj.h"
 #include <godot_cpp/core/class_db.hpp>
 
 using namespace godot;
@@ -76,65 +77,24 @@ Vector3 S3DCoords::world_to_lv95(Vector3 world_pos) const
 	return Vector3(origin_east - world_pos.x, world_pos.z + origin_north, world_pos.y);
 }
 
-// ---- WGS84 <-> LV95 (SwissTopo approximate formulas) ----
-// Reference: swisstopo, "Approximate formulas for the transformation between
-// the Swiss projection system and WGS84" (2016).
+// ---- WGS84 <-> LV95 (rigorous, see s3d_proj.h) ----
+// Swiss oblique Mercator on Bessel 1841 + CH1903+/WGS84 datum shift: matches
+// pyproj EPSG:4326 <-> EPSG:2056 (the bake pipeline) to the millimetre
+// anywhere in Europe. The former swisstopo approximation polynomial drifted
+// by kilometres outside Switzerland (32 km at Kirkenes).
 
 Vector3 S3DCoords::wgs84_to_lv95(double latitude, double longitude)
 {
-	// Auxiliary values: convert to arc-seconds and shift from Bern.
-	double phi_prime = (latitude - 46.9524058333) * 10000.0 / 3600.0;
-	double lambda_prime = (longitude - 7.4395833333) * 10000.0 / 3600.0;
-
-	double lp = lambda_prime;
-	double pp = phi_prime;
-
-	double east = 2600072.37
-		+ 211455.93 * lp
-		- 10938.51 * lp * pp
-		- 0.36 * lp * pp * pp
-		- 44.54 * lp * lp * lp;
-
-	double north = 1200147.07
-		+ 308807.95 * pp
-		+ 3745.25 * lp * lp
-		+ 76.63 * pp * pp
-		- 194.56 * lp * lp * pp
-		+ 119.79 * pp * pp * pp;
-
+	const proj::EN en = proj::wgs84_to_lv95(latitude, longitude);
 	// Returns (East, North, 0).
-	return Vector3(east, north, 0.0);
+	return Vector3(en.e, en.n, 0.0);
 }
 
 Vector3 S3DCoords::lv95_to_wgs84(double east, double north)
 {
-	// Auxiliary values.
-	double y_prime = (east - 2600000.0) / 1000000.0;
-	double x_prime = (north - 1200000.0) / 1000000.0;
-
-	double yp = y_prime;
-	double xp = x_prime;
-
-	// Longitude and latitude in 10000" units.
-	double lambda_s = 2.6779094
-		+ 4.728982 * yp
-		+ 0.791484 * yp * xp
-		+ 0.1306 * yp * xp * xp
-		- 0.0436 * yp * yp * yp;
-
-	double phi_s = 16.9023892
-		+ 3.238272 * xp
-		- 0.270978 * yp * yp
-		- 0.002528 * xp * xp
-		- 0.0447 * yp * yp * xp
-		- 0.0140 * xp * xp * xp;
-
-	// Convert from 10000" to degrees: value * 100 / 36.
-	double longitude = lambda_s * 100.0 / 36.0;
-	double latitude = phi_s * 100.0 / 36.0;
-
+	const proj::LatLon ll = proj::lv95_to_wgs84(east, north);
 	// Returns (latitude, longitude, 0).
-	return Vector3(latitude, longitude, 0.0);
+	return Vector3(ll.lat, ll.lon, 0.0);
 }
 
 // ---- WGS84 <-> Godot world (convenience) ----
