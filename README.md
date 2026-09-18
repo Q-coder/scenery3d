@@ -87,7 +87,10 @@ across many frames so the simulation never stalls:
 | `1` ECEF | WGS84 Earth-centred metres (double-precision engine required) | each tile/chunk/GLB/tree tile is placed with the local West-Up-North frame at its tile centre on the ellipsoid, times the LV95 → true-metres Jacobian (scale + grid convergence); terrain tiles subtract the curvature sag per vertex, 8 km far chunks are projected exactly per vertex |
 
 Meshes and GLB data stay in tile-local flat coordinates in both modes, so no
-scenery pack changes. The camera is mapped to grid E/N through the frame
+scenery pack changes. A terrain `manifest.json` may declare its grid CRS
+(`"crs": "EPSG:2056"`); this build streams a single LV95 grid, so a path that
+declares another CRS is skipped with a warning (multi-CRS streaming is the
+next step once a non-LV95 pack exists). The camera is mapped to grid E/N through the frame
 (ECEF → geodetic → LV95). Elevation queries: `get_elevation(x, z)` (flat
 world), `get_elevation_grid(e, n)`, `get_elevation_geodetic(lat, lon)`,
 `get_elevation_world(pos)`. The host-wired `S3DVegetationManager` has its

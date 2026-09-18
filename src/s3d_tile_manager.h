@@ -169,6 +169,8 @@ namespace s3d
 		// Effective pixels per tile for one data path: the manifest override
 		// when present, else the node-wide value.
 		int tile_px_for_path(const std::string &p_path) const;
+		// "crs" of a terrain manifest as an EPSG code (0 when absent).
+		static int manifest_crs_epsg(const std::string &p_dir);
 		// Re-parse every data path's manifest after data_paths changes.
 		void rebuild_path_tile_px();
 

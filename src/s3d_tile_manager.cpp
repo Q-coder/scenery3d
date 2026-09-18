@@ -91,6 +91,29 @@ int S3DTileManager::manifest_pixels_per_tile(const std::string &p_dir)
 	return px > 0 ? px : 0;
 }
 
+// EPSG code of a terrain manifest's "crs" field ("EPSG:2056"), 0 when absent.
+int S3DTileManager::manifest_crs_epsg(const std::string &p_dir)
+{
+	String mpath = String(std::string(p_dir).c_str()) + "/manifest.json";
+	Ref<FileAccess> f = FileAccess::open(mpath, FileAccess::READ);
+	if (f.is_null()) {
+		return 0;
+	}
+	Variant v = JSON::parse_string(f->get_as_text());
+	if (v.get_type() != Variant::DICTIONARY) {
+		return 0;
+	}
+	Dictionary d = v;
+	if (!d.has("crs")) {
+		return 0;
+	}
+	String crs = String(d["crs"]).to_upper().strip_edges();
+	if (crs.begins_with("EPSG:")) {
+		return crs.substr(5).to_int();
+	}
+	return crs.to_int();
+}
+
 int S3DTileManager::tile_px_for_path(const std::string &p_path) const
 {
 	auto it = path_tile_px.find(p_path);
@@ -1742,7 +1765,23 @@ String S3DTileManager::get_data_path() const
 
 void S3DTileManager::set_data_paths(const PackedStringArray &p_paths)
 {
-	data_paths = p_paths;
+	// Region CRS contract (design §9 D6): a terrain manifest may declare its
+	// grid CRS ("crs": "EPSG:2056"). The runtime keeps ONE tile grid, LV95
+	// (EPSG:2056); paths that declare another CRS are dropped with a clear
+	// message instead of being streamed on the wrong grid. Multi-CRS
+	// streaming is the next piece of work once the first such pack exists.
+	data_paths.clear();
+	for (int i = 0; i < p_paths.size(); i++) {
+		String p = p_paths[i];
+		if (p.is_empty()) continue;
+		int epsg = manifest_crs_epsg(std::string(p.utf8().get_data()));
+		if (epsg != 0 && epsg != 2056) {
+			UtilityFunctions::push_warning("S3DTileManager: region ", p, " declares crs EPSG:", epsg,
+				" but this build streams a single LV95 (EPSG:2056) grid — path skipped");
+			continue;
+		}
+		data_paths.push_back(p);
+	}
 	rebuild_path_tile_px();
 }
 
