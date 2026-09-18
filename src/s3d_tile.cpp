@@ -262,15 +262,66 @@ void S3DTile::generate_mesh()
 	array_mesh.instantiate();
 	array_mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
 
-	// Apply material.
+	// Skirts (surface 1): a vertical strip hanging from each border edge so
+	// that T-junction cracks between neighbouring tiles of different LOD
+	// (the finer edge's intermediate vertices lie above/below the coarser
+	// edge's straight segment) and any residual seam never show the sky or
+	// the globe through the terrain. Depth scales with the vertex spacing,
+	// which bounds the crack height; both windings are emitted so the wall is
+	// visible from either side regardless of the material's cull mode.
+	{
+		const real_t skirt_depth = MAX((real_t)20.0, (real_t)0.3 * MAX(spacing_x, spacing_z));
+		PackedVector3Array sv;
+		PackedVector3Array sn;
+		PackedVector2Array suv;
+		PackedInt32Array si;
+		auto add_edge = [&](auto index_of, int count) {
+			const int base = (int)sv.size();
+			for (int k = 0; k < count; k++) {
+				const int src = index_of(k);
+				sv.push_back(vertices[src]);
+				sn.push_back(normals[src]);
+				suv.push_back(uvs[src]);
+			}
+			for (int k = 0; k < count; k++) {
+				const int src = index_of(k);
+				Vector3 d = vertices[src];
+				d.y -= skirt_depth;
+				sv.push_back(d);
+				sn.push_back(normals[src]);
+				suv.push_back(uvs[src]);
+			}
+			for (int k = 0; k + 1 < count; k++) {
+				const int a = base + k, b = base + k + 1;
+				const int c = base + count + k, d = base + count + k + 1;
+				const int quad[12] = {a, c, b, b, c, d, a, b, c, b, d, c};
+				for (int q = 0; q < 12; q++) si.push_back(quad[q]);
+			}
+		};
+		add_edge([&](int k) { return k; }, verts_x);                                   // gz = 0 edge
+		add_edge([&](int k) { return (verts_z - 1) * verts_x + k; }, verts_x);        // gz = max edge
+		add_edge([&](int k) { return k * verts_x; }, verts_z);                        // gx = 0 edge
+		add_edge([&](int k) { return k * verts_x + (verts_x - 1); }, verts_z);        // gx = max edge
+		Array sarrays;
+		sarrays.resize(Mesh::ARRAY_MAX);
+		sarrays[Mesh::ARRAY_VERTEX] = sv;
+		sarrays[Mesh::ARRAY_NORMAL] = sn;
+		sarrays[Mesh::ARRAY_TEX_UV] = suv;
+		sarrays[Mesh::ARRAY_INDEX] = si;
+		array_mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, sarrays);
+	}
+
+	// Apply material (both surfaces).
 	if (material.is_valid()) {
 		array_mesh->surface_set_material(0, material);
+		array_mesh->surface_set_material(1, material);
 	} else {
 		Ref<StandardMaterial3D> mat;
 		mat.instantiate();
 		mat->set_albedo(Color(0.45, 0.55, 0.35));
 		mat->set_cull_mode(StandardMaterial3D::CULL_DISABLED);
 		array_mesh->surface_set_material(0, mat);
+		array_mesh->surface_set_material(1, mat);
 	}
 
 	set_mesh(array_mesh);
