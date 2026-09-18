@@ -276,6 +276,9 @@ namespace s3d
 
 		void update_tiles(godot::Vector3 camera_pos);
 		int get_active_tile_count() const;
+		// Tiles + chunks still loading (in flight on a worker or queued) —
+		// drives the intro-zoom "tiles loading" progress bar in the host.
+		int get_pending_count();
 
 		void set_tile_size(int p_size);
 		int get_tile_size() const;

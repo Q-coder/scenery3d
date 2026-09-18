@@ -1114,6 +1114,7 @@ void S3DTileManager::_bind_methods()
 {
 	ClassDB::bind_method(D_METHOD("update_tiles", "camera_pos"), &S3DTileManager::update_tiles);
 	ClassDB::bind_method(D_METHOD("get_active_tile_count"), &S3DTileManager::get_active_tile_count);
+	ClassDB::bind_method(D_METHOD("get_pending_count"), &S3DTileManager::get_pending_count);
 
 	ClassDB::bind_method(D_METHOD("set_tile_size", "size"), &S3DTileManager::set_tile_size);
 	ClassDB::bind_method(D_METHOD("get_tile_size"), &S3DTileManager::get_tile_size);
@@ -1689,6 +1690,18 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 }
 
 // --- Getters / Setters ---
+
+int S3DTileManager::get_pending_count()
+{
+	int n = 0;
+	for (const auto &kv : tiles) if (kv.second.loading) n++;
+	for (const auto &kv : chunks) if (kv.second.loading) n++;
+	{
+		std::lock_guard<std::mutex> lock(work_mutex);
+		n += (int)work_queue.size();
+	}
+	return n;
+}
 
 int S3DTileManager::get_active_tile_count() const
 {
