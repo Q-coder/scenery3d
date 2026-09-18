@@ -68,6 +68,68 @@ static bool ortho_merge_nodata(PackedByteArray &dst, const PackedByteArray &src)
 	return left;
 }
 
+// Fill the remaining (near-)no-data pixels of an RGB8 image from its own
+// valid pixels (nearest valid colour, two-pass propagation, O(n)). This is
+// what happens beyond the LAST source: Swiss tiles reaching into Austria /
+// Liechtenstein / Lake Constance kept SWISSIMAGE's white or black there and
+// drew white squares along those borders. Returns the number of valid
+// (real) pixels — 0 means the tile lies entirely outside every source.
+static int64_t ortho_fill_nodata(PackedByteArray &rgb, int w, int h)
+{
+	const int64_t n = (int64_t)w * h;
+	if (n <= 0 || rgb.size() < n * 3) return 0;
+	uint8_t *p = rgb.ptrw();
+	std::vector<int32_t> src(n, -1);
+	std::vector<int32_t> dist(n, 0x3fffffff);
+	int64_t valid = 0;
+	for (int64_t i = 0; i < n; i++) {
+		if (ortho_nodata_weight(p[i * 3], p[i * 3 + 1], p[i * 3 + 2]) <= 0.5f) {
+			src[i] = (int32_t)i;
+			dist[i] = 0;
+			valid++;
+		}
+	}
+	if (valid == 0 || valid == n) return valid;
+	auto relax = [&](int64_t i, int64_t j) {  // j: neighbour of i
+		if (src[j] >= 0 && dist[j] + 1 < dist[i]) { dist[i] = dist[j] + 1; src[i] = src[j]; }
+	};
+	for (int y = 0; y < h; y++) {
+		for (int x = 0; x < w; x++) {
+			const int64_t i = (int64_t)y * w + x;
+			if (dist[i] == 0) continue;
+			if (x > 0) relax(i, i - 1);
+			if (y > 0) relax(i, i - w);
+		}
+	}
+	for (int y = h - 1; y >= 0; y--) {
+		for (int x = w - 1; x >= 0; x--) {
+			const int64_t i = (int64_t)y * w + x;
+			if (dist[i] == 0) continue;
+			if (x + 1 < w) relax(i, i + 1);
+			if (y + 1 < h) relax(i, i + w);
+		}
+	}
+	// Mean colour of the real pixels: the nearest-pixel fill fades to it
+	// with distance (over ~1/32 of the tile), otherwise the two-pass fill
+	// draws long axis-aligned streaks across large no-data areas.
+	uint64_t acc[3] = { 0, 0, 0 };
+	for (int64_t i = 0; i < n; i++) {
+		if (dist[i] != 0) continue;
+		acc[0] += p[i * 3]; acc[1] += p[i * 3 + 1]; acc[2] += p[i * 3 + 2];
+	}
+	const float mean[3] = { (float)acc[0] / valid, (float)acc[1] / valid, (float)acc[2] / valid };
+	const float fade_px = (float)MAX(2, MIN(w, h) / 32);
+	for (int64_t i = 0; i < n; i++) {
+		if (dist[i] == 0 || src[i] < 0) continue;
+		const int64_t s = (int64_t)src[i] * 3;
+		const float t = MIN(1.0f, (float)dist[i] / fade_px);
+		for (int c = 0; c < 3; c++) {
+			p[i * 3 + c] = (uint8_t)(p[s + c] * (1.0f - t) + mean[c] * t + 0.5f);
+		}
+	}
+	return valid;
+}
+
 // --- Orthophoto mip path helper ---
 
 int S3DTileManager::ortho_mip_for_lod(int lod)
@@ -845,7 +907,39 @@ void S3DTileManager::worker_func()
 					}
 				}
 
-				if (composite_mode && composite_img.is_valid()) {
+				// Final pass (skip_white_pixels): whatever no-data is left after
+				// the sources are merged — or in a single-source tile — is filled
+				// from the tile's own pixels; a tile with (almost) no real pixels
+				// lies outside every source and is dropped so the coarse globe
+				// shows instead of a white/black square.
+				Ref<Image> final_img = composite_img;
+				if (skip_white_pixels && final_img.is_null() && !result.jpeg_bytes.empty()) {
+					PackedByteArray jpkg;
+					jpkg.resize((int)result.jpeg_bytes.size());
+					memcpy(jpkg.ptrw(), result.jpeg_bytes.data(), result.jpeg_bytes.size());
+					Ref<Image> img = Image::create_empty(1, 1, false, Image::FORMAT_RGB8);
+					if (img->load_jpg_from_buffer(jpkg) == OK && img->get_width() >= 2) {
+						if (img->get_format() != Image::FORMAT_RGB8) img->convert(Image::FORMAT_RGB8);
+						final_img = img;
+					}
+				}
+				if (skip_white_pixels && final_img.is_valid()) {
+					const int w = final_img->get_width(), h = final_img->get_height();
+					PackedByteArray d = final_img->get_data();
+					const int64_t valid = ortho_fill_nodata(d, w, h);
+					if (valid * 10 < (int64_t)w * h) {
+						// < 10 % real pixels: outside every source.
+						result.success = false;
+						result.jpeg_bytes.clear();
+						result.ortho_rgb.clear();
+						result.ortho_pixels = -1;
+					} else {
+						result.ortho_rgb.assign(d.ptr(), d.ptr() + d.size());
+						result.ortho_rgb_w = w;
+						result.ortho_pixels = req.ortho_pixels;
+						result.jpeg_bytes.clear();
+					}
+				} else if (composite_mode && composite_img.is_valid()) {
 					PackedByteArray cdata = composite_img->get_data();
 					result.ortho_rgb.assign(cdata.ptr(), cdata.ptr() + cdata.size());
 					result.ortho_rgb_w = composite_img->get_width();
@@ -977,6 +1071,23 @@ void S3DTileManager::process_load_results(int &verts_generated)
 						any_decoded = true;
 					}
 
+					bool chunk_outside = false;
+					if (any_decoded && skip_white_pixels) {
+						// Missing tiles stayed black in the composite; fill them and
+						// the no-data margins from the chunk's real pixels.
+						PackedByteArray cd = comp_img->get_data();
+						const int64_t valid = ortho_fill_nodata(cd, comp_size, comp_size);
+						if (valid * 10 < (int64_t)comp_size * comp_size) {
+							chunk_outside = true;
+						} else {
+							comp_img = Image::create_from_data(comp_size, comp_size, false, Image::FORMAT_RGB8, cd);
+						}
+					}
+					if (chunk_outside) {
+						memdelete(tile);
+						state.no_data = true;
+						continue;
+					}
 					if (any_decoded) {
 						Ref<ImageTexture> tex = ImageTexture::create_from_image(comp_img);
 						Ref<StandardMaterial3D> mat;
