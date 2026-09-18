@@ -72,42 +72,98 @@ std::vector<std::string> S3DTileManager::ortho_paths_for_tile(int ei, int ni, in
 // the source of truth; its absence means "same as the node value", which is
 // exactly how legacy regions (no pixels_per_tile field) keep working.
 
-int S3DTileManager::manifest_pixels_per_tile(const std::string &p_dir)
+// The bake pipeline writes a full per-tile list into terrain/manifest.json
+// (the Fennoscandia manifests are 140-310 MB). The runtime only needs a few
+// scalar fields, which sit at the head of the file, so read the first 64 KB
+// and pick them out textually instead of JSON-parsing the whole file (that
+// cost 11.7 s per set_data_paths call — at startup and on every settings
+// save). A small manifest whose head lacks the key is still fully parsed.
+static const int64_t MANIFEST_HEAD_BYTES = 65536;
+static const int64_t MANIFEST_FULL_PARSE_MAX = 4 * 1024 * 1024;
+
+static String manifest_head(const std::string &p_dir, int64_t &file_size)
+{
+	String mpath = String(std::string(p_dir).c_str()) + "/manifest.json";
+	Ref<FileAccess> f = FileAccess::open(mpath, FileAccess::READ);
+	file_size = 0;
+	if (f.is_null()) {
+		return String();
+	}
+	file_size = f->get_length();
+	PackedByteArray bytes = f->get_buffer(MIN(file_size, MANIFEST_HEAD_BYTES));
+	return String::utf8((const char *)bytes.ptr(), (int)bytes.size());
+}
+
+// Value text following "<key>": in a JSON head (up to ',' or '}'), or empty.
+static String manifest_head_value(const String &head, const String &key)
+{
+	int k = head.find(String("\"") + key + "\"");
+	if (k < 0) {
+		return String();
+	}
+	int c = head.find(":", k);
+	if (c < 0) {
+		return String();
+	}
+	int e = c + 1;
+	while (e < head.length() && (head[e] == ' ' || head[e] == '\t' || head[e] == '\n' || head[e] == '\r')) e++;
+	int end = e;
+	while (end < head.length() && head[end] != ',' && head[end] != '}' && head[end] != '\n') end++;
+	return head.substr(e, end - e).strip_edges().trim_prefix("\"").trim_suffix("\"");
+}
+
+static Dictionary manifest_full_parse(const std::string &p_dir)
 {
 	String mpath = String(std::string(p_dir).c_str()) + "/manifest.json";
 	Ref<FileAccess> f = FileAccess::open(mpath, FileAccess::READ);
 	if (f.is_null()) {
-		return 0;
+		return Dictionary();
 	}
 	Variant v = JSON::parse_string(f->get_as_text());
-	if (v.get_type() != Variant::DICTIONARY) {
+	return v.get_type() == Variant::DICTIONARY ? Dictionary(v) : Dictionary();
+}
+
+int S3DTileManager::manifest_pixels_per_tile(const std::string &p_dir)
+{
+	int64_t size = 0;
+	String head = manifest_head(p_dir, size);
+	if (head.is_empty()) {
 		return 0;
 	}
-	Dictionary d = v;
-	if (!d.has("pixels_per_tile")) {
-		return 0;
+	String v = manifest_head_value(head, "pixels_per_tile");
+	if (!v.is_empty()) {
+		int px = v.to_int();
+		return px > 0 ? px : 0;
 	}
-	int px = int(d["pixels_per_tile"]);
-	return px > 0 ? px : 0;
+	if (size <= MANIFEST_FULL_PARSE_MAX) {
+		Dictionary d = manifest_full_parse(p_dir);
+		if (d.has("pixels_per_tile")) {
+			int px = int(d["pixels_per_tile"]);
+			return px > 0 ? px : 0;
+		}
+	}
+	return 0;
 }
 
 // EPSG code of a terrain manifest's "crs" field ("EPSG:2056"), 0 when absent.
 int S3DTileManager::manifest_crs_epsg(const std::string &p_dir)
 {
-	String mpath = String(std::string(p_dir).c_str()) + "/manifest.json";
-	Ref<FileAccess> f = FileAccess::open(mpath, FileAccess::READ);
-	if (f.is_null()) {
+	int64_t size = 0;
+	String head = manifest_head(p_dir, size);
+	if (head.is_empty()) {
 		return 0;
 	}
-	Variant v = JSON::parse_string(f->get_as_text());
-	if (v.get_type() != Variant::DICTIONARY) {
+	String crs = manifest_head_value(head, "crs");
+	if (crs.is_empty() && size <= MANIFEST_FULL_PARSE_MAX) {
+		Dictionary d = manifest_full_parse(p_dir);
+		if (d.has("crs")) {
+			crs = String(d["crs"]);
+		}
+	}
+	crs = crs.to_upper().strip_edges();
+	if (crs.is_empty()) {
 		return 0;
 	}
-	Dictionary d = v;
-	if (!d.has("crs")) {
-		return 0;
-	}
-	String crs = String(d["crs"]).to_upper().strip_edges();
 	if (crs.begins_with("EPSG:")) {
 		return crs.substr(5).to_int();
 	}
@@ -1770,6 +1826,10 @@ void S3DTileManager::set_data_paths(const PackedStringArray &p_paths)
 	// (EPSG:2056); paths that declare another CRS are dropped with a clear
 	// message instead of being streamed on the wrong grid. Multi-CRS
 	// streaming is the next piece of work once the first such pack exists.
+	if (p_paths == data_paths_requested) {
+		return; // unchanged (settings saved without touching the library)
+	}
+	data_paths_requested = p_paths;
 	data_paths.clear();
 	for (int i = 0; i < p_paths.size(); i++) {
 		String p = p_paths[i];

@@ -200,6 +200,7 @@ namespace s3d
 		// Ordered list of directories to search for tile files.
 		// The first entry is returned by get_data_path() for backward compat.
 		godot::PackedStringArray data_paths;
+		godot::PackedStringArray data_paths_requested;  // last set_data_paths() argument (before CRS filtering)
 
 		// Per-data-path pixels-per-tile overrides, keyed by the exact path
 		// string in data_paths. Populated from each path's manifest.json
