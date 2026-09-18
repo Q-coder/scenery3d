@@ -45,7 +45,14 @@ namespace s3d
 		double y_offset = 0.0;
 		bool exact = false;
 		bool placed = false;
-		godot::Transform3D exact_wun;  // WUN frame at the centre (exact mode)
+		godot::Transform3D exact_wun;  // WUN frame at the centre (ECEF modes)
+		// ECEF non-exact ("corner") mode: the four tile corners are projected
+		// exactly and expressed in exact_wun; interior vertices interpolate
+		// them bilinearly, so a shared edge between neighbours is computed
+		// from the same two corner points on both sides (no seam), while the
+		// per-vertex cost stays a handful of multiplies. corner[0]=(x0,z0),
+		// [1]=(x1,z0), [2]=(x0,z1), [3]=(x1,z1) in mesh-local terms.
+		godot::Vector3 corner[4];
 
 		// Sample height at pixel coordinates, clamped to image bounds.
 		godot::real_t sample_height(int px, int py, int img_w, int img_h) const;

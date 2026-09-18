@@ -65,11 +65,10 @@ void S3DTile::generate_mesh()
 
 	// Placement-dependent vertex mapping (see set_placement).
 	const bool curved_exact = placed && frame.ecef() && exact;
-	const bool curved_affine = placed && frame.ecef() && !exact;
-	const double cx_local = anchor_e - center_e;
-	const double cz_local = center_n - anchor_n;
+	const bool curved_corner = placed && frame.ecef() && !exact;
 	const Basis exact_inv = exact_wun.basis.transposed();
-	const Basis exact_grid_basis = curved_exact ? frame.grid_basis_at(center_e, center_n) : Basis();
+	const Basis exact_grid_basis = (curved_exact || curved_corner) ? frame.grid_basis_at(center_e, center_n) : Basis();
+	const double ts_d = (double)tile_size;
 
 	// Compute stride from LOD level. Higher LOD = coarser mesh. Clamp so a
 	// low-resolution tile still yields at least a 2x2 mesh: a 34 px Norway
@@ -182,8 +181,18 @@ void S3DTile::generate_mesh()
 				const double n = anchor_n + (double)world_z;
 				const Vector3 w = frame.grid_to_world(e, n, (double)height);
 				vertices[idx] = exact_inv.xform(w - exact_wun.origin) - Vector3(0.0, y_offset, 0.0);
-			} else if (curved_affine) {
-				vertices[idx] = Vector3(world_x, height - (real_t)frame.sag((double)world_x - cx_local, (double)world_z - cz_local), world_z);
+			} else if (curved_corner) {
+				// Bilinear blend of the exactly projected corners (WUN-local,
+				// centred on the tile), minus the curvature sag.
+				const double u = (double)world_x / ts_d, v = (double)world_z / ts_d;
+				const double lx = (1.0 - u) * (1.0 - v) * corner[0].x + u * (1.0 - v) * corner[1].x + (1.0 - u) * v * corner[2].x + u * v * corner[3].x;
+				const double lz = (1.0 - u) * (1.0 - v) * corner[0].z + u * (1.0 - v) * corner[1].z + (1.0 - u) * v * corner[2].z + u * v * corner[3].z;
+				// Height goes up the LOCAL normal, which leans outward by
+				// (lx, lz)/R relative to the centre's up: without this a
+				// shared edge vertex 600 m ASL lands 5 cm apart on the two
+				// neighbouring tiles (thin gap lines seen at Oslo).
+				const double tilt = 1.0 + (double)height / S3DFrame::R_MEAN;
+				vertices[idx] = Vector3(lx * tilt, (double)height - frame.sag(lx, lz), lz * tilt);
 			} else {
 				vertices[idx] = Vector3(world_x, height, world_z);
 			}
@@ -211,7 +220,7 @@ void S3DTile::generate_mesh()
 				1.0,
 				(h_down - h_up) / dz
 			);
-			if (curved_exact) {
+			if (curved_exact || curved_corner) {
 				// Grid-space normal -> WUN-local (convergence/scale of the grid).
 				normal = exact_grid_basis.xform(normal);
 			}
@@ -279,9 +288,27 @@ void S3DTile::set_placement(const S3DFrame &p_frame, double p_anchor_e, double p
 	y_offset = p_y_offset;
 	exact = p_exact && frame.ecef();
 	placed = true;
-	if (exact) {
+	if (frame.ecef()) {
 		exact_wun = frame.wun_at(center_e, center_n);
 		set_transform(exact_wun * Transform3D(Basis(), Vector3(0.0, y_offset, 0.0)));
+		if (!exact) {
+			// Corner mode: project the four mesh corners (mesh-local x,z in
+			// {0, tile_size}) onto the ellipsoid and express them in the
+			// centre's WUN frame.
+			const Basis inv = exact_wun.basis.transposed();
+			const double ts = (double)tile_size;
+			const double xs[2] = {0.0, ts};
+			const double zs[2] = {0.0, ts};
+			for (int j = 0; j < 2; ++j) {
+				for (int i = 0; i < 2; ++i) {
+					const double e = anchor_e - xs[i];
+					const double n = anchor_n + zs[j];
+					Vector3 l = inv.xform(frame.grid_to_world(e, n, 0.0) - exact_wun.origin);
+					l.y = 0.0;
+					corner[j * 2 + i] = l;
+				}
+			}
+		}
 	} else {
 		set_transform(frame.place(anchor_e, anchor_n, center_e, center_n, y_offset));
 	}
