@@ -52,6 +52,10 @@ namespace s3d
 			int current_ortho_pixels = -1;
 			bool loading = false;
 			bool no_data = false; // File doesn't exist for this tile position.
+			// Chunks only: composite resolution the mesh was built at
+			// (chunk_res_for_distance). A different desired value queues a
+			// rebuild so chunks sharpen as the camera approaches.
+			int chunk_res = 0;
 		};
 
 		// Background file load request.
@@ -239,14 +243,27 @@ namespace s3d
 		// texture, so even one is moderately expensive.
 		static constexpr int CHUNKS_PER_FRAME = 1;
 
-		// Resolution of chunk composite heightmaps.
+		// Resolution of chunk composite heightmaps by distance (tiles from
+		// the camera to the chunk's nearest tile): 129 px (62 m) near the
+		// individual-tile ring, 65 px (125 m) mid, 33 px (250 m) far. The
+		// near value matches the 30 m base packs' outermost tile LOD so the
+		// tile/chunk handoff no longer changes the mesh spacing 4×.
 		static constexpr int CHUNK_COMPOSITE_RES = 33;
+		static constexpr int CHUNK_RES_NEAR = 129;
+		static constexpr int CHUNK_RES_MID = 65;
+		static constexpr int CHUNK_NEAR_TILES = 32;
+		static constexpr int CHUNK_MID_TILES = 64;
+		static constexpr int CHUNK_RES_HYSTERESIS_TILES = 4;
+		int chunk_res_for_distance(int dist, int current_res) const;
 
 		// Y offset (metres) applied to chunk meshes so they sit just below
 		// the individual-tile surface and lose the depth test wherever the
-		// two overlap. Large enough to cover the error from 250 m chunk
-		// sampling vs 1 m tile sampling on typical terrain.
+		// two overlap. Scaled with the composite spacing: 30 m at 250 m
+		// spacing (the error of 250 m sampling vs 1 m tiles on typical
+		// terrain), 7.5 m at 62 m, so the surface no longer jumps 30 m when
+		// individual tiles replace a fine chunk.
 		static constexpr double CHUNK_Y_BIAS = -30.0;
+		static constexpr double CHUNK_Y_BIAS_REF_SPACING_M = 250.0;
 
 		godot::Ref<S3DElevationDB> elevation_db;
 

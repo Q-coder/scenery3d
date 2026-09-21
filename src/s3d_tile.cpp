@@ -1,4 +1,5 @@
 #include "s3d_tile.h"
+#include <cmath>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/math.hpp>
 #include <godot_cpp/classes/mesh.hpp>
@@ -75,7 +76,7 @@ void S3DTile::generate_mesh()
 	// tile at LOD 6 (stride 64) otherwise produced NO mesh at all — an
 	// invisible tile the far chunk had already been dropped for, i.e. a hole
 	// (seen as sky through the suppressed globe south of Oslo, 2026-09-18).
-	int stride = 1 << lod_level;
+	int stride = 1 << effective_lod(lod_level, img_w, tile_size);
 	if (stride > img_w - 1) stride = img_w - 1;
 	if (stride > img_h - 1) stride = img_h - 1;
 	if (stride < 1) stride = 1;
@@ -394,6 +395,16 @@ Ref<Image> S3DTile::get_heightmap() const
 bool S3DTile::is_mesh_ready() const
 {
 	return mesh_ready;
+}
+
+int S3DTile::effective_lod(int lod, int img_w, int tile_size_m)
+{
+	if (lod < 0) lod = 0;
+	if (img_w < 2 || tile_size_m <= 0) return lod;
+	const double px_res = (double)tile_size_m / (double)(img_w - 1);
+	const int res_lod = (int)std::lround(std::log2(std::max(px_res, 1.0)));
+	const int e = lod - res_lod;
+	return e < 0 ? 0 : e;
 }
 
 void S3DTile::set_lod_level(int p_lod)

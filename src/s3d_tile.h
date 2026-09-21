@@ -85,6 +85,16 @@ namespace s3d
 
 		void set_lod_level(int p_lod);
 		int get_lod_level() const;
+		// LOD levels name a target vertex spacing of 2^lod metres (the ring
+		// table was written for 1 m/px tiles). A tile stored at a coarser
+		// pixel resolution reaches that spacing with a smaller stride:
+		// a 34 px / 1024 m tile (31 m/px) stays at stride 1 for every ring
+		// up to LOD 4 (16 m target) and uses stride 2 at LOD 6 (64 m).
+		// Before this, ring LODs were applied as raw strides to every tile,
+		// so the 30 m base packs rendered 256 m–1 km cells inside 16 km
+		// while the far chunks beyond used 250 m — the Alps morphed at
+		// every ring (2026-09-20).
+		static int effective_lod(int lod, int img_w, int tile_size_m);
 
 		void set_tile_x(int p_x);
 		int get_tile_x() const;

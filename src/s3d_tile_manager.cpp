@@ -184,6 +184,59 @@ std::vector<std::string> S3DTileManager::ortho_paths_for_tile(int ei, int ni, in
 // the source of truth; its absence means "same as the node value", which is
 // exactly how legacy regions (no pixels_per_tile field) keep working.
 
+// ── Cross-resolution terrain merge ─────────────────────────────────────────
+//
+// Two terrain sources can cover the same tile at different pixels_per_tile
+// (a 1025 px CH/BW detail pack over a 34 px SRTM base pack, design §11 D13).
+// Both lattices span the full tile in the same orientation (col 0 = east
+// edge, row 0 = south edge), so a pixel (c, r) of one lattice sits at
+// (c·(n−1)/(m−1), r·(n−1)/(m−1)) on the other. The finer source is
+// authoritative wherever it has data; its no-data (0.0) samples are filled
+// from the coarser source, bilinearly resampled from non-zero neighbours
+// only. Without this the diagonal no-data wedge along the BW pack's eastern
+// edge (its UTM32 source cells projected into LV95) stayed at 0 m next to
+// the 30 m base terrain — a dark cliff at the pack boundary.
+static float elev_sample_nonzero(const float *src, int src_px, double u, double v)
+{
+	int c0 = (int)std::floor(u), r0 = (int)std::floor(v);
+	int c1 = std::min(c0 + 1, src_px - 1), r1 = std::min(r0 + 1, src_px - 1);
+	c0 = std::max(0, std::min(c0, src_px - 1));
+	r0 = std::max(0, std::min(r0, src_px - 1));
+	double fc = std::max(0.0, std::min(1.0, u - c0));
+	double fr = std::max(0.0, std::min(1.0, v - r0));
+	const float s[4] = { src[(size_t)r0 * src_px + c0], src[(size_t)r0 * src_px + c1],
+		src[(size_t)r1 * src_px + c0], src[(size_t)r1 * src_px + c1] };
+	const double w[4] = { (1 - fc) * (1 - fr), fc * (1 - fr), (1 - fc) * fr, fc * fr };
+	double num = 0.0, den = 0.0;
+	for (int i = 0; i < 4; i++) {
+		if (s[i] != 0.0f) { num += s[i] * w[i]; den += w[i]; }
+	}
+	return den > 0.0 ? (float)(num / den) : 0.0f;
+}
+
+// Fill the zero samples of `dst` (dst_px² floats) from `src` (src_px² floats)
+// of a different resolution. When `src` is the finer source it becomes the
+// new `dst` (its zeros filled from the old, coarser data); dst_px follows.
+static void elev_fill_zeros_resampled(std::vector<uint8_t> &dst, int &dst_px,
+	std::vector<uint8_t> &src, int src_px)
+{
+	if (dst_px < 2 || src_px < 2 || dst_px == src_px) return;
+	if (src_px > dst_px) {
+		std::swap(dst, src);
+		std::swap(dst_px, src_px);
+	}
+	float *d = reinterpret_cast<float *>(dst.data());
+	const float *sp = reinterpret_cast<const float *>(src.data());
+	const double k = (double)(src_px - 1) / (double)(dst_px - 1);
+	for (int r = 0; r < dst_px; r++) {
+		for (int c = 0; c < dst_px; c++) {
+			float &v = d[(size_t)r * dst_px + c];
+			if (v != 0.0f) continue;
+			v = elev_sample_nonzero(sp, src_px, c * k, r * k);
+		}
+	}
+}
+
 // The bake pipeline writes a full per-tile list into terrain/manifest.json
 // (the Fennoscandia manifests are 140-310 MB). The runtime only needs a few
 // scalar fields, which sit at the head of the file, so read the first 64 KB
@@ -379,6 +432,18 @@ int S3DTileManager::lod_for_distance(int dist) const
 	return lod_rings.back().lod_level;
 }
 
+int S3DTileManager::chunk_res_for_distance(int dist, int current_res) const
+{
+	// Hysteresis: a chunk only drops to a coarser resolution once the
+	// camera is CHUNK_RES_HYSTERESIS_TILES past the threshold, so flying
+	// along a threshold does not rebuild the same chunks back and forth.
+	int near_lim = CHUNK_NEAR_TILES + (current_res == CHUNK_RES_NEAR ? CHUNK_RES_HYSTERESIS_TILES : 0);
+	int mid_lim = CHUNK_MID_TILES + (current_res == CHUNK_RES_MID ? CHUNK_RES_HYSTERESIS_TILES : 0);
+	if (dist <= near_lim) return CHUNK_RES_NEAR;
+	if (dist <= mid_lim) return CHUNK_RES_MID;
+	return CHUNK_COMPOSITE_RES;
+}
+
 // --- Background worker thread pool ---
 
 void S3DTileManager::start_worker()
@@ -501,8 +566,6 @@ void S3DTileManager::worker_func()
 								scratch.clear();
 							} else if (scratch.size() == data.size()) {
 								// Merge: fill zero samples from this source.
-								// A size mismatch means the sources store
-								// different resolutions — keep the first.
 								float *dst = reinterpret_cast<float *>(data.data());
 								const float *src = reinterpret_cast<const float *>(scratch.data());
 								size_t n = data.size() / 4;
@@ -511,6 +574,10 @@ void S3DTileManager::worker_func()
 										dst[i] = src[i];
 									}
 								}
+							} else {
+								// Different resolutions: the finer source
+								// wins, the coarser one fills its no-data.
+								elev_fill_zeros_resampled(data, data_px, scratch, px_b);
 							}
 						}
 						// Gap-fill the freshly loaded tile before sampling: the
@@ -723,10 +790,11 @@ void S3DTileManager::worker_func()
 			//
 			// Each candidate path may store its tiles at a different pixel
 			// resolution (manifest.json pixels_per_tile), so the expected
-			// file size and the merge are per-candidate. A size mismatch
-			// between sources means different resolutions — the first
-			// source found wins for that tile (regions don't overlap in
-			// practice; CH/BW/Norway occupy disjoint LV95 areas).
+			// file size and the merge are per-candidate. Sources of a
+			// different resolution are merged by elev_fill_zeros_resampled:
+			// the finer source is authoritative, the coarser one fills its
+			// no-data samples (a 34 px base pack under the 1025 px CH/BW
+			// detail packs, design §11 D13).
 			std::vector<uint8_t> scratch;
 			for (size_t i = 0; i < req.paths.size(); i++) {
 				int px_i = (i < req.path_px.size() && req.path_px[i] > 0)
@@ -757,6 +825,8 @@ void S3DTileManager::worker_func()
 							dst[k] = src[k];
 						}
 					}
+				} else {
+					elev_fill_zeros_resampled(result.raw_bytes, result.tile_px, scratch, px_i);
 				}
 			}
 
@@ -957,6 +1027,12 @@ void S3DTileManager::worker_func()
 
 // --- Process completed file loads on main thread ---
 
+static bool heightmap_is_large(const Ref<Image> &img)
+{
+	if (img.is_null()) return false;
+	return (int64_t)img->get_width() * img->get_height() * 4 > 64 * 1024;
+}
+
 void S3DTileManager::process_load_results(int &verts_generated)
 {
 	int chunks_done = 0;
@@ -1116,21 +1192,31 @@ void S3DTileManager::process_load_results(int &verts_generated)
 				// ridgelines. In ECEF mode chunks are placed EXACTLY (every
 				// vertex projected) — an 8 km affine tile would sag 1.25 m
 				// and its seams would mismatch by ~1 m far from the CRS origin.
-				const double ts = (double)tile_size;
-				tile->set_placement(frame,
-					(double)(base_ei + chunk_size) * ts, (double)base_ni * ts,
-					((double)base_ei + 0.5 * chunk_size) * ts, ((double)base_ni + 0.5 * chunk_size) * ts,
-					CHUNK_Y_BIAS, frame.ecef());
-
 				add_child(tile);
 				state.node = tile;
 				bump_coverage();
+			}
+
+			{
+				// (Re)place on every build: the Y bias follows the composite
+				// spacing, and a chunk rebuilt at a finer resolution moves
+				// up accordingly.
+				const double ts = (double)tile_size;
+				const double spacing = (double)chunk_size * ts / (double)(cres - 1);
+				const double bias = CHUNK_Y_BIAS * (spacing / CHUNK_Y_BIAS_REF_SPACING_M);
+				int base_ei = result.ei * chunk_size;
+				int base_ni = result.ni * chunk_size;
+				state.node->set_placement(frame,
+					(double)(base_ei + chunk_size) * ts, (double)base_ni * ts,
+					((double)base_ei + 0.5 * chunk_size) * ts, ((double)base_ni + 0.5 * chunk_size) * ts,
+					bias, frame.ecef());
 			}
 
 			state.node->set_heightmap(heightmap);
 			state.node->set_lod_level(0); // Use every pixel.
 			state.node->generate_mesh();
 			state.current_lod = 0;
+			state.chunk_res = cres;
 			state.node->set_heightmap(Ref<Image>()); // Free memory.
 			verts_generated += chunk_verts;
 			chunks_done++;
@@ -1167,8 +1253,8 @@ void S3DTileManager::process_load_results(int &verts_generated)
 		}
 
 		int desired_lod = state.desired_lod >= 0 ? state.desired_lod : result.desired_lod;
-		int stride = 1 << desired_lod;
 		int tpx = result.tile_px > 0 ? result.tile_px : result.tile_size;
+		int stride = 1 << S3DTile::effective_lod(desired_lod, tpx, tile_size);
 		int verts_per_axis = (tpx - 1) / stride + 1;
 		int tile_verts = verts_per_axis * verts_per_axis;
 
@@ -1299,7 +1385,11 @@ void S3DTileManager::process_load_results(int &verts_generated)
 			elevation_db->load_tile(result.ei, result.ni, heightmap);
 		}
 
-		if (desired_lod >= LOD_DISCARD_THRESHOLD) {
+		// Discard the heightmap of distant tiles to bound memory — only
+		// worth it for large tiles (a 1025 px tile is 4 MB; a 34 px base
+		// tile is 4.6 KB and re-reading it on every ring crossing would
+		// just cost I/O).
+		if (desired_lod >= LOD_DISCARD_THRESHOLD && heightmap_is_large(heightmap)) {
 			state.node->set_heightmap(Ref<Image>());
 		}
 	}
@@ -1550,16 +1640,23 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 			bool mip_change = (desired_pixels != -1 && desired_pixels != state.current_ortho_pixels);
 
 			if (state.node->get_heightmap().is_valid() && !mip_change) {
-				int stride = 1 << state.desired_lod;
 				// Budget against the heightmap's actual resolution — with
 				// per-path pixels_per_tile (Norway 34 px vs CH/BW 512 px)
 				// the node-wide value would over-count ~200×.
 				int img_w = state.node->get_heightmap()->get_width();
+				int eff_desired = S3DTile::effective_lod(state.desired_lod, img_w, tile_size);
+				int eff_current = S3DTile::effective_lod(state.current_lod, img_w, tile_size);
+				int stride = 1 << eff_desired;
 				int verts_per_axis = (img_w - 1) / stride + 1;
-				int tile_verts = verts_per_axis * verts_per_axis;
+				int tile_verts = 0;
 
 				state.node->set_lod_level(state.desired_lod);
-				state.node->generate_mesh();
+				// A ring change that maps to the same stride for this
+				// tile's resolution keeps the mesh: no rebuild, no pop.
+				if (eff_desired != eff_current || state.current_lod < 0) {
+					state.node->generate_mesh();
+					tile_verts = verts_per_axis * verts_per_axis;
+				}
 
 				// Update elevation DB registration.
 				if (state.current_lod >= LOD_DISCARD_THRESHOLD &&
@@ -1580,8 +1677,9 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 				state.current_lod = state.desired_lod;
 				verts_generated += tile_verts;
 
-				// Discard heightmap if now distant.
-				if (state.desired_lod >= LOD_DISCARD_THRESHOLD) {
+				// Discard heightmap if now distant (large tiles only, see
+				// heightmap_is_large).
+				if (state.desired_lod >= LOD_DISCARD_THRESHOLD && heightmap_is_large(state.node->get_heightmap())) {
 					state.node->set_heightmap(Ref<Image>());
 				}
 			} else {
@@ -1778,12 +1876,23 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 			required_chunks.insert(ckey);
 
 			auto it = chunks.find(ckey);
+			bool need_request = false;
+			int cres = CHUNK_COMPOSITE_RES;
 			if (it == chunks.end()) {
 				TileState state;
 				state.desired_lod = 0;
 				state.loading = true;
 				chunks[ckey] = state;
-
+				cres = chunk_res_for_distance(min_dist, 0);
+				need_request = true;
+			} else if (!it->second.loading && !it->second.no_data && it->second.node != nullptr) {
+				cres = chunk_res_for_distance(min_dist, it->second.chunk_res);
+				if (cres != it->second.chunk_res) {
+					it->second.loading = true;
+					need_request = true;
+				}
+			}
+			if (need_request) {
 				LoadRequest req;
 				req.is_chunk = true;
 				req.ei = cg_ei;
@@ -1792,7 +1901,7 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 				req.chunk_grid_ei = cg_ei;
 				req.chunk_grid_ni = cg_ni;
 				req.chunk_tile_count = chunk_size;
-				req.composite_res = CHUNK_COMPOSITE_RES;
+				req.composite_res = cres;
 				req.tile_size = tile_size;
 				req.tile_px = effective_tile_px();
 				req.base_paths = base_paths_str;
