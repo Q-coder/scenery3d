@@ -42,6 +42,7 @@ namespace s3d
 			godot::PackedColorArray colors;
 			godot::PackedVector2Array uvs;   // TEXCOORD_0: metres across / along (base-tier roads)
 			godot::PackedVector2Array uvs2;  // TEXCOORD_1: (half width m, spare)
+			godot::PackedInt64Array way_ids; // _WAYID: OSM way id per vertex (0 = design geometry), optional
 			godot::PackedInt32Array indices;
 		};
 
@@ -177,7 +178,12 @@ namespace s3d
 		// again from disk (after a bake rewrote them). Results of loads still in
 		// flight are discarded by process_load_results (unknown keys).
 		void reload_tiles();
+		// Ways the scenery design replaces: their triangles are dropped when a
+		// tile is built (a bake would remove them for good). Reloads the tiles.
+		void set_hidden_ways(const godot::PackedInt64Array &p_ids);
+		godot::PackedInt64Array get_hidden_ways() const;
 	private:
+		std::unordered_set<int64_t> hidden_ways;
 
 		static bool parse_glb(const std::vector<uint8_t> &data, SurfaceData &out);
 

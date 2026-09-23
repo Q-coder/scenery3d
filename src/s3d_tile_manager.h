@@ -7,6 +7,8 @@
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/packed_string_array.hpp>
+#include <godot_cpp/variant/dictionary.hpp>
+#include "s3d_terrain_patches.h"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -133,6 +135,9 @@ namespace s3d
 
 		// Active tile states keyed by tile_key(ei, ni).
 		std::unordered_map<uint64_t, TileState> tiles;
+		// Scenery-editor terrain patches (plateaus, corridors) written into every
+		// close tile's heights as it is decoded; set_terrain_patches reloads the tiles.
+		S3DTerrainPatches terrain_patches;
 
 		// Far terrain chunks keyed by tile_key(chunk_grid_ei, chunk_grid_ni).
 		std::unordered_map<uint64_t, TileState> chunks;
@@ -369,6 +374,16 @@ namespace s3d
 
 		void set_elevation_db(godot::Ref<S3DElevationDB> p_db);
 		godot::Ref<S3DElevationDB> get_elevation_db() const;
+		// {"plateaus": [{"poly": PackedVector2Array (e, n), "h": float}],
+		//  "corridors": [{"stations": PackedVector3Array (e, n, h), "reach": float}]}
+		void set_terrain_patches(const godot::Dictionary &p_patches);
+		int get_terrain_patch_count() const;
+		// Drop every loaded close tile so it streams in again (patched).
+		void reload_tiles();
+		int get_reload_count() const { return reload_count; }
+	private:
+		int reload_count = 0;
+	public:
 	};
 
 }

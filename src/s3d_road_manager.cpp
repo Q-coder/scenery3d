@@ -367,6 +367,26 @@ bool S3DRoadManager::parse_glb(const std::vector<uint8_t> &data, SurfaceData &ou
 
 	// Indices
 	{
+	// _WAYID — SCALAR uint32 (or float), optional: the OSM way id per vertex
+	{
+		int w_acc = attrs->get_int("_WAYID", -1);
+		if (w_acc >= 0 && w_acc < (int)accessors->arr_items.size()) {
+			auto &acc = accessors->arr_items[w_acc];
+			int bv_idx = acc.get_int("bufferView", -1);
+			int count = acc.get_int("count", 0);
+			int ctype = acc.get_int("componentType", 0);
+			if (bv_idx >= 0 && bv_idx < (int)buffer_views->arr_items.size() && (ctype == 5125 || ctype == 5126)) {
+				auto &bv = buffer_views->arr_items[bv_idx];
+				int offset = bv.get_int("byteOffset", 0);
+				const uint8_t *p = bin_data + offset;
+				out.way_ids.resize(count);
+				for (int i = 0; i < count; i++) {
+					out.way_ids[i] = (ctype == 5125) ? (int64_t)s3d_read_u32(p + i * 4) : (int64_t)s3d_read_f32(p + i * 4);
+				}
+			}
+		}
+	}
+
 		int idx_acc = prim.get_int("indices", -1);
 		if (idx_acc < 0 || idx_acc >= (int)accessors->arr_items.size()) return false;
 		auto &acc = accessors->arr_items[idx_acc];
@@ -651,7 +671,29 @@ void S3DRoadManager::process_load_results()
 		if (result.surface.uvs2.size() == result.surface.vertices.size()) {
 			arrays[Mesh::ARRAY_TEX_UV2] = result.surface.uvs2;
 		}
-		arrays[Mesh::ARRAY_INDEX] = result.surface.indices;
+		if (!hidden_ways.empty() && result.surface.way_ids.size() == result.surface.vertices.size()) {
+			// drop the triangles of the ways the design replaces
+			PackedInt32Array kept;
+			const PackedInt32Array &src = result.surface.indices;
+			kept.resize(src.size());
+			int64_t n_kept = 0;
+			for (int64_t t = 0; t + 2 < src.size(); t += 3) {
+				int64_t wid = result.surface.way_ids[src[t]];
+				if (wid != 0 && hidden_ways.count(wid)) continue;
+				kept[n_kept++] = src[t];
+				kept[n_kept++] = src[t + 1];
+				kept[n_kept++] = src[t + 2];
+			}
+			kept.resize(n_kept);
+			if (n_kept == 0) {
+				state.no_data = true;
+				state.loaded = true;
+				continue;
+			}
+			arrays[Mesh::ARRAY_INDEX] = kept;
+		} else {
+			arrays[Mesh::ARRAY_INDEX] = result.surface.indices;
+		}
 		mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
 		size_t group_index = (colon != std::string::npos) ? (size_t)std::stoul(result.tile_id.substr(0, colon)) : (size_t)-1;
 		mesh->surface_set_material(0, material_for_group(group_index));
@@ -866,6 +908,8 @@ void S3DRoadManager::_bind_methods()
 {
 	ClassDB::bind_method(D_METHOD("get_active_tile_count"), &S3DRoadManager::get_active_tile_count);
 	ClassDB::bind_method(D_METHOD("reload_tiles"), &S3DRoadManager::reload_tiles);
+	ClassDB::bind_method(D_METHOD("set_hidden_ways", "ids"), &S3DRoadManager::set_hidden_ways);
+	ClassDB::bind_method(D_METHOD("get_hidden_ways"), &S3DRoadManager::get_hidden_ways);
 
 	ClassDB::bind_method(D_METHOD("set_road_path", "path"), &S3DRoadManager::set_road_path);
 	ClassDB::bind_method(D_METHOD("get_road_path"), &S3DRoadManager::get_road_path);
@@ -924,6 +968,22 @@ void S3DRoadManager::reload_tiles()
 	}
 	tiles.clear();
 	manifest_loaded = false;
+}
+
+void S3DRoadManager::set_hidden_ways(const PackedInt64Array &p_ids)
+{
+	std::unordered_set<int64_t> next;
+	for (int64_t i = 0; i < p_ids.size(); i++) next.insert(p_ids[i]);
+	if (next == hidden_ways) return;
+	hidden_ways = std::move(next);
+	reload_tiles();
+}
+
+PackedInt64Array S3DRoadManager::get_hidden_ways() const
+{
+	PackedInt64Array out;
+	for (int64_t id : hidden_ways) out.push_back(id);
+	return out;
 }
 
 void S3DRoadManager::set_road_paths(const PackedStringArray &p_paths)

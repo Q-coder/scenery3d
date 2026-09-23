@@ -1,4 +1,7 @@
 #include "s3d_tile_manager.h"
+#include <godot_cpp/variant/packed_vector2_array.hpp>
+#include <godot_cpp/variant/packed_vector3_array.hpp>
+#include <algorithm>
 #include "s3d_tile.h"
 
 #include <godot_cpp/core/class_db.hpp>
@@ -1269,6 +1272,13 @@ void S3DTileManager::process_load_results(int &verts_generated)
 		bytes.resize(result.raw_bytes.size());
 		memcpy(bytes.ptrw(), result.raw_bytes.data(), result.raw_bytes.size());
 		result.raw_bytes.clear();
+		if (!terrain_patches.empty() && bytes.size() == (int64_t)tpx * tpx * 4) {
+			// the scenery design's plateaus and corridors, before the mesh and
+			// the elevation DB see the heights
+			const double ts = (double)tile_size;
+			terrain_patches.apply(reinterpret_cast<float *>(bytes.ptrw()), tpx, tpx,
+				(double)(result.ei + 1) * ts, (double)result.ni * ts, ts);
+		}
 
 		Ref<Image> heightmap = Image::create_from_data(
 			tpx, tpx, false, Image::FORMAT_RF, bytes);
@@ -1400,6 +1410,10 @@ void S3DTileManager::process_load_results(int &verts_generated)
 void S3DTileManager::_bind_methods()
 {
 	ClassDB::bind_method(D_METHOD("update_tiles", "camera_pos"), &S3DTileManager::update_tiles);
+	ClassDB::bind_method(D_METHOD("set_terrain_patches", "patches"), &S3DTileManager::set_terrain_patches);
+	ClassDB::bind_method(D_METHOD("get_terrain_patch_count"), &S3DTileManager::get_terrain_patch_count);
+	ClassDB::bind_method(D_METHOD("reload_tiles"), &S3DTileManager::reload_tiles);
+	ClassDB::bind_method(D_METHOD("get_reload_count"), &S3DTileManager::get_reload_count);
 	ClassDB::bind_method(D_METHOD("get_active_tile_count"), &S3DTileManager::get_active_tile_count);
 	ClassDB::bind_method(D_METHOD("get_pending_count"), &S3DTileManager::get_pending_count);
 
@@ -2136,6 +2150,94 @@ void S3DTileManager::set_data_path(const String &p_path)
 String S3DTileManager::get_data_path() const
 {
 	return data_paths.is_empty() ? String() : String(data_paths[0]);
+}
+
+void S3DTileManager::set_terrain_patches(const Dictionary &p_patches)
+{
+	S3DTerrainPatches next;
+	Array plateaus = p_patches.get("plateaus", Array());
+	for (int i = 0; i < plateaus.size(); i++) {
+		Dictionary d = plateaus[i];
+		PackedVector2Array poly = d.get("poly", PackedVector2Array());
+		if (poly.size() < 3) continue;
+		S3DPlateau p;
+		p.h = (double)d.get("h", 0.0);
+		p.e0 = p.n0 = 1e18; p.e1 = p.n1 = -1e18;
+		for (int k = 0; k < poly.size(); k++) {
+			p.poly.emplace_back(poly[k].x, poly[k].y);
+			p.e0 = std::min(p.e0, (double)poly[k].x); p.e1 = std::max(p.e1, (double)poly[k].x);
+			p.n0 = std::min(p.n0, (double)poly[k].y); p.n1 = std::max(p.n1, (double)poly[k].y);
+		}
+		next.plateaus.push_back(std::move(p));
+	}
+	Array corridors = p_patches.get("corridors", Array());
+	for (int i = 0; i < corridors.size(); i++) {
+		Dictionary d = corridors[i];
+		PackedVector3Array st = d.get("stations", PackedVector3Array());
+		if (st.size() < 2) continue;
+		S3DCorridor c;
+		c.reach = (double)d.get("reach", 20.0);
+		c.e0 = c.n0 = 1e18; c.e1 = c.n1 = -1e18;
+		for (int k = 0; k < st.size(); k++) {
+			c.st.push_back({(double)st[k].x, (double)st[k].y, (double)st[k].z});
+			c.e0 = std::min(c.e0, (double)st[k].x); c.e1 = std::max(c.e1, (double)st[k].x);
+			c.n0 = std::min(c.n0, (double)st[k].y); c.n1 = std::max(c.n1, (double)st[k].y);
+		}
+		c.e0 -= c.reach; c.e1 += c.reach; c.n0 -= c.reach; c.n1 += c.reach;
+		next.corridors.push_back(std::move(c));
+	}
+	Array pp = p_patches.get("protect_polys", Array());
+	for (int i = 0; i < pp.size(); i++) {
+		PackedVector2Array poly = pp[i];
+		if (poly.size() < 3) continue;
+		S3DPlateau p;
+		p.e0 = p.n0 = 1e18; p.e1 = p.n1 = -1e18;
+		for (int k = 0; k < poly.size(); k++) {
+			p.poly.emplace_back(poly[k].x, poly[k].y);
+			p.e0 = std::min(p.e0, (double)poly[k].x); p.e1 = std::max(p.e1, (double)poly[k].x);
+			p.n0 = std::min(p.n0, (double)poly[k].y); p.n1 = std::max(p.n1, (double)poly[k].y);
+		}
+		next.protect_polys.push_back(std::move(p));
+	}
+	Array pc = p_patches.get("protect_corridors", Array());
+	for (int i = 0; i < pc.size(); i++) {
+		Dictionary d = pc[i];
+		PackedVector2Array st = d.get("stations", PackedVector2Array());
+		if (st.size() < 2) continue;
+		S3DCorridor c;
+		c.reach = (double)d.get("reach", 20.0);
+		c.e0 = c.n0 = 1e18; c.e1 = c.n1 = -1e18;
+		for (int k = 0; k < st.size(); k++) {
+			c.st.push_back({(double)st[k].x, (double)st[k].y, 0.0});
+			c.e0 = std::min(c.e0, (double)st[k].x); c.e1 = std::max(c.e1, (double)st[k].x);
+			c.n0 = std::min(c.n0, (double)st[k].y); c.n1 = std::max(c.n1, (double)st[k].y);
+		}
+		c.e0 -= c.reach; c.e1 += c.reach; c.n0 -= c.reach; c.n1 += c.reach;
+		next.protect_corridors.push_back(std::move(c));
+	}
+	terrain_patches = std::move(next);
+	reload_tiles();
+}
+
+int S3DTileManager::get_terrain_patch_count() const
+{
+	return (int)(terrain_patches.plateaus.size() + terrain_patches.corridors.size());
+}
+
+void S3DTileManager::reload_tiles()
+{
+	reload_count++;
+	for (auto &kv : tiles) {
+		TileState &state = kv.second;
+		if (state.node) {
+			if (elevation_db.is_valid()) {
+				elevation_db->unload_tile(state.node->get_tile_x(), state.node->get_tile_z());
+			}
+			state.node->queue_free();
+		}
+	}
+	tiles.clear();
+	bump_coverage();
 }
 
 void S3DTileManager::set_data_paths(const PackedStringArray &p_paths)
