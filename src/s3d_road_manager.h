@@ -5,6 +5,8 @@
 #include <godot_cpp/classes/mesh_instance3d.hpp>
 #include <godot_cpp/classes/array_mesh.hpp>
 #include <godot_cpp/classes/standard_material3d.hpp>
+#include <godot_cpp/classes/shader_material.hpp>
+#include <godot_cpp/classes/material.hpp>
 #include <godot_cpp/classes/ref.hpp>
 
 #include "s3d_elevation_db.h"
@@ -38,6 +40,8 @@ namespace s3d
 			godot::PackedVector3Array vertices;
 			godot::PackedVector3Array normals;
 			godot::PackedColorArray colors;
+			godot::PackedVector2Array uvs;   // TEXCOORD_0: metres across / along (base-tier roads)
+			godot::PackedVector2Array uvs2;  // TEXCOORD_1: (half width m, spare)
 			godot::PackedInt32Array indices;
 		};
 
@@ -85,6 +89,7 @@ namespace s3d
 			double conv_origin_e = 0.0;
 			double conv_origin_n = 0.0;
 			bool elevation_baked = false; // true → vertex Y already carries ASL + offset
+			std::string shader;           // "roads": procedural surface shader (UV in metres, kind in COLOR.a)
 			std::unordered_map<std::string, ManifestEntry> entries;
 		};
 
@@ -106,6 +111,8 @@ namespace s3d
 
 		// Shared material.
 		godot::Ref<godot::StandardMaterial3D> road_material;
+		godot::Ref<godot::ShaderMaterial> roads_shader_material;   // shaders/roads.gdshader, loaded on first use
+		godot::Ref<godot::Material> material_for_group(size_t gi);
 
 		// Configuration.
 		godot::String road_path;
@@ -165,6 +172,12 @@ namespace s3d
 		// every vertex hit valid terrain (so the tile no longer needs retry).
 		bool apply_drape(TileState &state, bool &out_fully_resolved);
 		void retry_pending_drapes();
+	public:
+		// Drop every loaded tile and re-read the manifests: the tiles stream in
+		// again from disk (after a bake rewrote them). Results of loads still in
+		// flight are discarded by process_load_results (unknown keys).
+		void reload_tiles();
+	private:
 
 		static bool parse_glb(const std::vector<uint8_t> &data, SurfaceData &out);
 

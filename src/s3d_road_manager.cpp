@@ -5,6 +5,9 @@
 #include <godot_cpp/classes/camera3d.hpp>
 #include <godot_cpp/classes/mesh.hpp>
 #include <godot_cpp/classes/geometry_instance3d.hpp>
+#include <godot_cpp/classes/resource_loader.hpp>
+#include <godot_cpp/classes/shader.hpp>
+#include <godot_cpp/classes/shader_material.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include <algorithm>
@@ -344,6 +347,24 @@ bool S3DRoadManager::parse_glb(const std::vector<uint8_t> &data, SurfaceData &ou
 		}
 	}
 
+	// TEXCOORD_0 / TEXCOORD_1 — VEC2 float, optional (base-tier road tiles)
+	for (int set = 0; set < 2; set++) {
+		int uv_acc = attrs->get_int(set == 0 ? "TEXCOORD_0" : "TEXCOORD_1", -1);
+		if (uv_acc < 0 || uv_acc >= (int)accessors->arr_items.size()) continue;
+		auto &acc = accessors->arr_items[uv_acc];
+		int bv_idx = acc.get_int("bufferView", -1);
+		int count = acc.get_int("count", 0);
+		if (acc.get_int("componentType", 0) != 5126 || bv_idx < 0 || bv_idx >= (int)buffer_views->arr_items.size()) continue;
+		auto &bv = buffer_views->arr_items[bv_idx];
+		int offset = bv.get_int("byteOffset", 0);
+		const uint8_t *p = bin_data + offset;
+		PackedVector2Array &dst = set == 0 ? out.uvs : out.uvs2;
+		dst.resize(count);
+		for (int i = 0; i < count; i++) {
+			dst[i] = Vector2(s3d_read_f32(p + i * 8), s3d_read_f32(p + i * 8 + 4));
+		}
+	}
+
 	// Indices
 	{
 		int idx_acc = prim.get_int("indices", -1);
@@ -417,6 +438,7 @@ void S3DRoadManager::load_manifests()
 		group.conv_origin_e = root.get_double("conversion_origin_e", origin_east);
 		group.conv_origin_n = root.get_double("conversion_origin_n", origin_north);
 		group.elevation_baked = root.get_bool("elevation_baked", false);
+		group.shader = root.get_str("shader");
 
 		auto *tiles_obj = root.get("tiles");
 		if (!tiles_obj || tiles_obj->type != JsonValue::OBJECT) {
@@ -623,9 +645,16 @@ void S3DRoadManager::process_load_results()
 		if (result.surface.colors.size() == result.surface.vertices.size()) {
 			arrays[Mesh::ARRAY_COLOR] = result.surface.colors;
 		}
+		if (result.surface.uvs.size() == result.surface.vertices.size()) {
+			arrays[Mesh::ARRAY_TEX_UV] = result.surface.uvs;
+		}
+		if (result.surface.uvs2.size() == result.surface.vertices.size()) {
+			arrays[Mesh::ARRAY_TEX_UV2] = result.surface.uvs2;
+		}
 		arrays[Mesh::ARRAY_INDEX] = result.surface.indices;
 		mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
-		mesh->surface_set_material(0, road_material);
+		size_t group_index = (colon != std::string::npos) ? (size_t)std::stoul(result.tile_id.substr(0, colon)) : (size_t)-1;
+		mesh->surface_set_material(0, material_for_group(group_index));
 
 		MeshInstance3D *mi = memnew(MeshInstance3D);
 		mi->set_name(String("road_") + String(result.tile_id.c_str()));
@@ -688,6 +717,28 @@ void S3DRoadManager::process_load_results()
 			state.baked = SurfaceData();
 		}
 	}
+}
+
+// The base-tier road tiles (manifest "shader": "roads") carry metres in
+// their UVs and the surface kind in the vertex alpha: one procedural
+// ShaderMaterial draws asphalt, markings, ballast and rails for all of them.
+// Legacy tiles keep the vertex-colour StandardMaterial.
+Ref<Material> S3DRoadManager::material_for_group(size_t gi)
+{
+	if (gi < manifests.size() && manifests[gi].shader == "roads") {
+		if (roads_shader_material.is_null()) {
+			Ref<Shader> sh = ResourceLoader::get_singleton()->load("res://addons/scenery3d/shaders/roads.gdshader");
+			if (sh.is_valid()) {
+				roads_shader_material.instantiate();
+				roads_shader_material->set_shader(sh);
+			} else {
+				UtilityFunctions::push_warning("S3DRoadManager: shaders/roads.gdshader not found, base-tier roads use the vertex-colour material");
+			}
+		}
+		if (roads_shader_material.is_valid())
+			return roads_shader_material;
+	}
+	return road_material;
 }
 
 bool S3DRoadManager::apply_drape(TileState &state, bool &out_fully_resolved)
@@ -814,6 +865,7 @@ void S3DRoadManager::retry_pending_drapes()
 void S3DRoadManager::_bind_methods()
 {
 	ClassDB::bind_method(D_METHOD("get_active_tile_count"), &S3DRoadManager::get_active_tile_count);
+	ClassDB::bind_method(D_METHOD("reload_tiles"), &S3DRoadManager::reload_tiles);
 
 	ClassDB::bind_method(D_METHOD("set_road_path", "path"), &S3DRoadManager::set_road_path);
 	ClassDB::bind_method(D_METHOD("get_road_path"), &S3DRoadManager::get_road_path);
@@ -864,6 +916,15 @@ void S3DRoadManager::set_road_path(const String &p_path)
 	manifest_loaded = false;
 }
 String S3DRoadManager::get_road_path() const { return road_path; }
+
+void S3DRoadManager::reload_tiles()
+{
+	for (auto &kv : tiles) {
+		if (kv.second.node) kv.second.node->queue_free();
+	}
+	tiles.clear();
+	manifest_loaded = false;
+}
 
 void S3DRoadManager::set_road_paths(const PackedStringArray &p_paths)
 {
