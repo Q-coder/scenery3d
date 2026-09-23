@@ -15,6 +15,7 @@
 //   kind 10 grass, 11 forest floor, 12 field, 13 water, 14 building roof, 15 building wall
 //   (scenery editor areas, UV = metres)
 //   kind 9 rail (extruded section: steel head, rusty flanks)
+//   kind 16 embankment (the strip from a ribbon edge down to the ground)
 shader_type spatial;
 render_mode cull_disabled, depth_draw_opaque;
 
@@ -44,6 +45,19 @@ void vertex() {
 	uv_m = UV;
 	vcol = COLOR;
 	uv_info = UV2;
+	// Beyond the near ring the terrain is drawn from block-averaged coarser
+	// LODs, which bury a ribbon that sits 0.2 m over the full-resolution
+	// ground. Pull every vertex a little towards the camera along its view
+	// ray (up to 1.5 % of the distance, from 250 m out): a road 2 km away
+	// wins the depth test against a hump up to ~30 m high, and nothing near
+	// by moves. VERTEX is in model space here: the camera in model space is
+	// the inverse modelview's translation (never CAMERA_POSITION_WORLD with
+	// MODEL_MATRIX in the double build, see docs).
+	vec3 cam = (inverse(MODELVIEW_MATRIX) * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+	vec3 to_cam = cam - VERTEX;
+	float dist = length(to_cam);
+	float pull = 0.015 * smoothstep(250.0, 2000.0, dist);
+	VERTEX += to_cam * pull;
 }
 
 // 1 inside a line of half-width hw centred on x0, soft edge of `soft` metres
@@ -97,6 +111,13 @@ void fragment() {
 		base = mix(a, b, n1) * (0.9 + 0.2 * n2);
 		rough = 1.0;
 		spec = 0.02;
+	} else if (kind == 16) {
+		// embankment: the terrain's own flat green and material response
+		// (S3DTileManager's shared StandardMaterial3D: albedo, roughness 1,
+		// specular 0.5), so the strip is not distinguishable by shade
+		base = vec3(0.45, 0.55, 0.35);
+		rough = 1.0;
+		spec = 0.5;
 	} else if (kind == 13) {
 		// water: dark blue-green, glossy
 		base = mix(vec3(0.10, 0.22, 0.30), vec3(0.14, 0.30, 0.38), n1);

@@ -21,6 +21,7 @@ struct S3DPlateau {
 struct S3DCorridor {
 	std::vector<std::array<double, 3>> st;         // stations (e, n, h)
 	double reach = 0.0;                            // metres either side of the line
+	double half_width = 0.0;                       // the ribbon's half width (blend weights start at its edge)
 	double e0 = 0, e1 = 0, n0 = 0, n1 = 0;         // bounding box (stations + reach)
 };
 
@@ -50,8 +51,9 @@ struct S3DTerrainPatches {
 		return inside;
 	}
 
-	// Height of the nearest corridor segment within reach, or NaN.
-	static double corridor_height(const S3DCorridor &c, double e, double n) {
+	// Height of the nearest corridor segment within reach, or NaN; the
+	// distance to it in *dist when given.
+	static double corridor_height(const S3DCorridor &c, double e, double n, double *dist = nullptr) {
 		double best_d2 = c.reach * c.reach;
 		double best_h = NAN;
 		for (size_t i = 0; i + 1 < c.st.size(); i++) {
@@ -67,6 +69,7 @@ struct S3DTerrainPatches {
 				best_h = c.st[i][2] + (c.st[i + 1][2] - c.st[i][2]) * t;
 			}
 		}
+		if (dist) *dist = std::sqrt(best_d2);
 		return best_h;
 	}
 
@@ -102,15 +105,21 @@ struct S3DTerrainPatches {
 			for (int px = 0; px < w; px++) {
 				const double e = anchor_e - px * step;
 				float &v = data[py * w + px];
-				// corridors first, plateaus win (a road on a plateau lies on it);
+				// corridors first (where they overlap, the heights blend by
+				// 1 / (edge distance + 3 m)^2 as in build_world_roads.py),
+				// plateaus win over corridors (a road on a plateau lies on it);
 				// airport plateaus are never touched by a corridor
+				double sw = 0.0, swh = 0.0;
 				for (const S3DCorridor *c : co) {
 					if (e < c->e0 || e > c->e1 || n < c->n0 || n > c->n1) continue;
-					double hh = corridor_height(*c, e, n);
+					double d = 0.0;
+					double hh = corridor_height(*c, e, n, &d);
 					if (std::isnan(hh)) continue;
-					if (protected_at(e, n)) break;
-					v = (float)hh; changed++;
+					double ed = d - c->half_width;
+					double w = 1.0 / ((ed < 0.0 ? 0.0 : ed) + 3.0) / ((ed < 0.0 ? 0.0 : ed) + 3.0);
+					sw += w; swh += w * hh;
 				}
+				if (sw > 0.0 && !protected_at(e, n)) { v = (float)(swh / sw); changed++; }
 				for (const S3DPlateau *p : pl) {
 					if (e < p->e0 || e > p->e1 || n < p->n0 || n > p->n1) continue;
 					if (point_in_polygon(e, n, p->poly)) { v = (float)p->h; changed++; }

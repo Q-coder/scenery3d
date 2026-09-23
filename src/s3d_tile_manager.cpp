@@ -2177,6 +2177,7 @@ void S3DTileManager::set_terrain_patches(const Dictionary &p_patches)
 		if (st.size() < 2) continue;
 		S3DCorridor c;
 		c.reach = (double)d.get("reach", 20.0);
+		c.half_width = (double)d.get("half", 0.0);
 		c.e0 = c.n0 = 1e18; c.e1 = c.n1 = -1e18;
 		for (int k = 0; k < st.size(); k++) {
 			c.st.push_back({(double)st[k].x, (double)st[k].y, (double)st[k].z});
@@ -2206,6 +2207,7 @@ void S3DTileManager::set_terrain_patches(const Dictionary &p_patches)
 		if (st.size() < 2) continue;
 		S3DCorridor c;
 		c.reach = (double)d.get("reach", 20.0);
+		c.half_width = (double)d.get("half", 0.0);
 		c.e0 = c.n0 = 1e18; c.e1 = c.n1 = -1e18;
 		for (int k = 0; k < st.size(); k++) {
 			c.st.push_back({(double)st[k].x, (double)st[k].y, 0.0});
