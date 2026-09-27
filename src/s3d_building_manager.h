@@ -9,6 +9,7 @@
 
 #include <unordered_map>
 #include "s3d_frame.h"
+#include "s3d_exclusion.h"
 #include <unordered_set>
 #include <vector>
 #include <deque>
@@ -98,6 +99,7 @@ namespace s3d
 			double origin_e = 2600000.0;
 			double origin_n = 1200000.0;
 			int building_count = 0;
+			int dir_index = 0;       // Index of `dir` in buildings_paths (priority order).
 		};
 
 		// Loaded manifest (merged across all configured buildings dirs).
@@ -109,6 +111,12 @@ namespace s3d
 
 		// Set of UUIDs hidden by user.
 		std::unordered_set<std::string> hidden_buildings;
+
+		// Zones of higher-priority packs whose buildings replace ours.
+		S3DExclusionZones exclusions;
+		godot::Array exclusion_zones;
+		int excluded_count = 0;
+		void clear_loaded_tiles();
 
 		// Background worker.
 		static constexpr int NUM_WORKERS = 2;
@@ -201,6 +209,13 @@ namespace s3d
 
 		int get_active_tile_count() const;
 		int get_building_count() const;
+
+		// Exclusion zones (s3d_exclusion.h): buildings whose footprint centre
+		// lies inside a zone are neither instantiated nor merged into the far
+		// mesh. Setting the zones reloads the tiles.
+		void set_exclusion_zones(const godot::Array &zones);
+		godot::Array get_exclusion_zones() const;
+		int get_excluded_building_count() const;
 	};
 
 }

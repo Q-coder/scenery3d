@@ -9,6 +9,7 @@
 
 #include <unordered_map>
 #include "s3d_frame.h"
+#include "s3d_exclusion.h"
 #include <unordered_set>
 #include <vector>
 #include <deque>
@@ -71,6 +72,12 @@ namespace s3d
 
 		// Tile state keyed by "<group_index>:<tile_e>_<tile_n>".
 		std::unordered_map<std::string, TileState> tiles;
+
+		// Zones of higher-priority packs that must stay free of trees.
+		S3DExclusionZones exclusions;
+		godot::Array exclusion_zones;
+		int excluded_count = 0;
+		void clear_loaded_tiles();
 
 		// Background worker.
 		static constexpr int NUM_WORKERS = 2;
@@ -153,6 +160,10 @@ namespace s3d
 		double get_density_fraction() const;
 
 		int get_active_tile_count() const;
+
+		void set_exclusion_zones(const godot::Array &zones);
+		godot::Array get_exclusion_zones() const;
+		int get_excluded_tree_count() const;
 	};
 
 }

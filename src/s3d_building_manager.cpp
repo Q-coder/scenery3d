@@ -427,6 +427,7 @@ void S3DBuildingManager::load_manifest()
 			entry.tile_id = map_key;
 			entry.raw_tile_id = key;
 			entry.dir = dir_std;
+			entry.dir_index = dir_idx;
 			entry.file = val.get_str("file");
 			entry.center_e = val.get_double("center_e");
 			entry.center_n = val.get_double("center_n");
@@ -717,6 +718,30 @@ void S3DBuildingManager::process_load_results()
 			create_detail = (dist <= (double)detail_radius_m);
 		}
 
+		// Buildings inside an exclusion zone of a higher-priority pack: the
+		// footprint centre in LV95 from the flat offsets (x = origin_e - e,
+		// z = n - origin_n).
+		std::vector<bool> excluded(result.buildings.size(), false);
+		if (!exclusions.empty() && mit != manifest.end()) {
+			for (size_t bi = 0; bi < result.buildings.size(); bi++) {
+				const SurfaceData &sd = result.buildings[bi].lod0_wall.vertices.size() > 0
+					? result.buildings[bi].lod0_wall : result.buildings[bi].lod0_roof;
+				const int nv = sd.vertices.size();
+				if (nv == 0) continue;
+				double sx = 0.0, sz = 0.0;
+				for (int vi = 0; vi < nv; vi++) {
+					sx += sd.vertices[vi].x;
+					sz += sd.vertices[vi].z;
+				}
+				const double e = mit->second.origin_e - sx / nv;
+				const double n = mit->second.origin_n + sz / nv;
+				if (exclusions.contains(e, n, mit->second.dir_index)) {
+					excluded[bi] = true;
+					excluded_count++;
+				}
+			}
+		}
+
 		// Create container node for individual buildings (only if near).
 		if (create_detail) {
 			Node3D *root = memnew(Node3D);
@@ -728,7 +753,9 @@ void S3DBuildingManager::process_load_results()
 				mit->second.center_e, mit->second.center_n, 0.0));
 			state.root_node = root;
 
-			for (auto &bld_data : result.buildings) {
+			for (size_t bi = 0; bi < result.buildings.size(); bi++) {
+				auto &bld_data = result.buildings[bi];
+				if (excluded[bi]) continue;
 				if (bld_data.lod0_wall.vertices.size() == 0 &&
 				    bld_data.lod0_roof.vertices.size() == 0) continue;
 
@@ -765,7 +792,9 @@ void S3DBuildingManager::process_load_results()
 		if (!state.far_lod_node) {
 			SurfaceData merged_wall, merged_roof;
 			int wall_offset = 0, roof_offset = 0;
-			for (auto &bld_data : result.buildings) {
+			for (size_t bi = 0; bi < result.buildings.size(); bi++) {
+				auto &bld_data = result.buildings[bi];
+				if (excluded[bi]) continue;
 				auto &w = bld_data.lod0_wall;
 				if (w.vertices.size() > 0 && w.indices.size() > 0) {
 					int base = merged_wall.vertices.size();
@@ -870,6 +899,9 @@ void S3DBuildingManager::_bind_methods()
 	ClassDB::bind_method(D_METHOD("get_hidden_buildings"), &S3DBuildingManager::get_hidden_buildings);
 	ClassDB::bind_method(D_METHOD("get_active_tile_count"), &S3DBuildingManager::get_active_tile_count);
 	ClassDB::bind_method(D_METHOD("get_building_count"), &S3DBuildingManager::get_building_count);
+	ClassDB::bind_method(D_METHOD("set_exclusion_zones", "zones"), &S3DBuildingManager::set_exclusion_zones);
+	ClassDB::bind_method(D_METHOD("get_exclusion_zones"), &S3DBuildingManager::get_exclusion_zones);
+	ClassDB::bind_method(D_METHOD("get_excluded_building_count"), &S3DBuildingManager::get_excluded_building_count);
 
 	ClassDB::bind_method(D_METHOD("set_buildings_paths", "paths"), &S3DBuildingManager::set_buildings_paths);
 	ClassDB::bind_method(D_METHOD("get_buildings_paths"), &S3DBuildingManager::get_buildings_paths);
@@ -922,6 +954,26 @@ int S3DBuildingManager::get_building_count() const
 	}
 	return count;
 }
+
+void S3DBuildingManager::clear_loaded_tiles()
+{
+	for (auto &[tid, state] : tiles) {
+		if (state.root_node) state.root_node->queue_free();
+		if (state.far_lod_node) state.far_lod_node->queue_free();
+	}
+	tiles.clear();
+	excluded_count = 0;
+}
+
+void S3DBuildingManager::set_exclusion_zones(const Array &zones)
+{
+	exclusion_zones = zones;
+	exclusions.set_from_array(zones, "buildings");
+	clear_loaded_tiles();
+}
+
+Array S3DBuildingManager::get_exclusion_zones() const { return exclusion_zones; }
+int S3DBuildingManager::get_excluded_building_count() const { return excluded_count; }
 
 void S3DBuildingManager::set_buildings_paths(const PackedStringArray &p_paths)
 {

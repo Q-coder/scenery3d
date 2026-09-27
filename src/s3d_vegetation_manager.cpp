@@ -9,6 +9,7 @@
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -311,6 +312,27 @@ void S3DVegetationManager::process_load_results()
 			st.no_data = true;
 			continue;
 		}
+		// Exclusion zones of higher-priority packs (an airfield's apron).
+		if (!exclusions.empty()) {
+			int dir_index = 0;
+			const size_t colon = result.tile_id.find(':');
+			if (colon != std::string::npos) dir_index = std::atoi(result.tile_id.substr(0, colon).c_str());
+			std::vector<size_t> kept;
+			kept.reserve(keep_indices.size());
+			for (size_t i : keep_indices) {
+				const TreeInstance &t = result.trees[i];
+				if (exclusions.contains(result.tile_east + (double)t.dx, result.tile_north + (double)t.dz, dir_index)) {
+					excluded_count++;
+				} else {
+					kept.push_back(i);
+				}
+			}
+			keep_indices.swap(kept);
+			if (keep_indices.empty()) {
+				st.no_data = true;
+				continue;
+			}
+		}
 		mm->set_instance_count((int)keep_indices.size());
 
 		// Tree records are flat offsets from the tile's SW corner (anchor);
@@ -382,6 +404,9 @@ void S3DVegetationManager::_process(double /*delta*/)
 
 void S3DVegetationManager::_bind_methods()
 {
+	ClassDB::bind_method(D_METHOD("set_exclusion_zones", "zones"), &S3DVegetationManager::set_exclusion_zones);
+	ClassDB::bind_method(D_METHOD("get_exclusion_zones"), &S3DVegetationManager::get_exclusion_zones);
+	ClassDB::bind_method(D_METHOD("get_excluded_tree_count"), &S3DVegetationManager::get_excluded_tree_count);
 	ClassDB::bind_method(D_METHOD("set_vegetation_paths", "paths"),
 	                     &S3DVegetationManager::set_vegetation_paths);
 	ClassDB::bind_method(D_METHOD("get_vegetation_paths"),
@@ -452,6 +477,25 @@ void S3DVegetationManager::_bind_methods()
 	ClassDB::bind_method(D_METHOD("get_active_tile_count"),
 	                     &S3DVegetationManager::get_active_tile_count);
 }
+
+void S3DVegetationManager::clear_loaded_tiles()
+{
+	for (auto &[tid, st] : tiles) {
+		if (st.node) st.node->queue_free();
+	}
+	tiles.clear();
+	excluded_count = 0;
+}
+
+void S3DVegetationManager::set_exclusion_zones(const Array &zones)
+{
+	exclusion_zones = zones;
+	exclusions.set_from_array(zones, "vegetation");
+	clear_loaded_tiles();
+}
+
+Array S3DVegetationManager::get_exclusion_zones() const { return exclusion_zones; }
+int S3DVegetationManager::get_excluded_tree_count() const { return excluded_count; }
 
 void S3DVegetationManager::set_vegetation_paths(const PackedStringArray &p_paths)
 {
