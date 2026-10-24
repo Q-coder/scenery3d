@@ -46,10 +46,25 @@ namespace s3d
 			godot::PackedInt32Array indices;
 		};
 
+		// Height lookup of the drawn surface under a grid point (ground
+		// vehicles, JSBSim's ground): the triangles one can stand on of an
+		// elevation-baked tile, in a 2D grid of CELL_M cells, in the tile's
+		// local coordinates like the vertices (x = anchor_e - E, y = baked
+		// ASL, z = N - anchor_n). Built by the worker, read on the main thread.
+		struct SurfaceLookup {
+			static constexpr double CELL_M = 8.0;
+			godot::PackedVector3Array verts;
+			std::vector<int32_t> tris;                                 // 3 vertex indices per triangle
+			std::unordered_map<int64_t, std::vector<int32_t>> cells;   // cell -> triangle indices
+			bool empty() const { return tris.empty(); }
+			static int64_t cell_key(int cx, int cz) { return ((int64_t)cx << 32) ^ (int64_t)(uint32_t)cz; }
+		};
+
 		struct TileState {
 			godot::MeshInstance3D *node = nullptr;
 			godot::Ref<godot::ArrayMesh> mesh;
 			SurfaceData baked;     // pristine vertices for re-drape
+			SurfaceLookup lookup;  // surface_height_at(); empty unless the tile is elevation-baked
 			double dx = 0.0;       // cached LV95 origin offset
 			double dz = 0.0;
 			// Placement (see S3DFrame::place); root_y is the local-up offset.
@@ -68,12 +83,14 @@ namespace s3d
 			std::string tile_id;
 			std::string path;
 			int distance;
+			std::unordered_set<int64_t> hidden;   // hidden_ways when queued: the lookup drops them like the mesh
 		};
 
 		struct LoadResult {
 			std::string tile_id;
 			bool success = false;
 			SurfaceData surface;
+			SurfaceLookup lookup;
 		};
 
 		struct ManifestEntry {
@@ -91,6 +108,7 @@ namespace s3d
 			double conv_origin_n = 0.0;
 			bool elevation_baked = false; // true → vertex Y already carries ASL + offset
 			std::string shader;           // "roads": procedural surface shader (UV in metres, kind in COLOR.a)
+			double tile_m = 1024.0;       // "tile_size_m": tile ids are "<E>_<N>" of the tile's SW corner on this grid
 			std::unordered_map<std::string, ManifestEntry> entries;
 		};
 
@@ -186,6 +204,7 @@ namespace s3d
 		std::unordered_set<int64_t> hidden_ways;
 
 		static bool parse_glb(const std::vector<uint8_t> &data, SurfaceData &out);
+		static void build_lookup(const SurfaceData &surface, const std::unordered_set<int64_t> &hidden, SurfaceLookup &out);
 
 	protected:
 		static void _bind_methods();
@@ -223,6 +242,16 @@ namespace s3d
 		void set_elevation_db(const godot::Ref<S3DElevationDB> &p_db) { elevation_db = p_db; }
 
 		int get_active_tile_count() const;
+
+		// Height (metres ASL) of the drawn road / rail surface under LV95
+		// (e, n): the baked vertex Y with the tile's root drop and the
+		// curvature sag, so it is exactly the drawn surface. Of the triangles
+		// under the point the highest within tol_m of h_hint wins (a car
+		// under a bridge keeps the ground, a car on the deck keeps the deck,
+		// a junction patch beats the ribbon it covers); NAN when no baked
+		// triangle is there. Walls, piers, parapets, roofs and the painted
+		// lines do not count. Elevation-baked tiles only (the base tier).
+		double surface_height_at(double e, double n, double h_hint, double tol_m) const;
 	};
 
 }

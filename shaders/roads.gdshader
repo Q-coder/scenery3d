@@ -16,6 +16,7 @@
 //   (scenery editor areas, UV = metres)
 //   kind 9 rail (extruded section: steel head, rusty flanks)
 //   kind 16 embankment (the strip from a ribbon edge down to the ground)
+//   kind 17 painted line (edge / lane / centre lines as their own strips)
 shader_type spatial;
 render_mode cull_disabled, depth_draw_opaque;
 
@@ -111,6 +112,12 @@ void fragment() {
 		base = mix(a, b, n1) * (0.9 + 0.2 * n2);
 		rough = 1.0;
 		spec = 0.02;
+	} else if (kind == 17) {
+		// painted line: its own strip over the pavement (build_world_roads.py
+		// emit_markings), slightly worn
+		base = vcol.rgb * (0.9 + 0.2 * n2);
+		rough = 0.6;
+		spec = 0.2;
 	} else if (kind == 16) {
 		// embankment: the terrain's own flat green and material response
 		// (S3DTileManager's shared StandardMaterial3D: albedo, roughness 1,

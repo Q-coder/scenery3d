@@ -90,6 +90,7 @@ void S3DRoadManager::worker_func()
 		file.close();
 
 		result.success = parse_glb(data, result.surface);
+		if (result.success) build_lookup(result.surface, req.hidden, result.lookup);
 
 		std::lock_guard<std::mutex> lock(results_mutex);
 		results_queue.push_back(std::move(result));
@@ -459,6 +460,7 @@ void S3DRoadManager::load_manifests()
 		group.conv_origin_n = root.get_double("conversion_origin_n", origin_north);
 		group.elevation_baked = root.get_bool("elevation_baked", false);
 		group.shader = root.get_str("shader");
+		group.tile_m = root.get_double("tile_size_m", 1024.0);
 
 		auto *tiles_obj = root.get("tiles");
 		if (!tiles_obj || tiles_obj->type != JsonValue::OBJECT) {
@@ -540,6 +542,7 @@ void S3DRoadManager::update_tiles(Vector3 camera_pos)
 				req.tile_id = key;
 				req.path = file_path;
 				req.distance = (int)dist;
+				req.hidden = hidden_ways;
 				new_requests.push_back(std::move(req));
 			}
 		}
@@ -649,6 +652,8 @@ void S3DRoadManager::process_load_results()
 		state.center_e = center_e;
 		state.center_n = center_n;
 		state.baked = result.surface;
+		// the height lookup: only a baked Y is the drawn Y (a draped tile moves its vertices)
+		state.lookup = elevation_baked ? std::move(result.lookup) : SurfaceLookup();
 
 		Ref<ArrayMesh> mesh;
 		mesh.instantiate();
@@ -902,6 +907,93 @@ void S3DRoadManager::retry_pending_drapes()
 	}
 }
 
+// ── Surface height lookup ───────────────────────────────────────────────────
+
+// Vertex-alpha kinds of build_world_roads.py that are no surface to stand on.
+static bool s3d_kind_is_structure(int kind)
+{
+	return kind == 7 /* concrete: piers, parapets */ || kind == 14 /* roof */ || kind == 15 /* wall */ || kind == 17 /* painted line */;
+}
+
+void S3DRoadManager::build_lookup(const SurfaceData &surface, const std::unordered_set<int64_t> &hidden, SurfaceLookup &out)
+{
+	const int nv = surface.vertices.size();
+	const int ni = surface.indices.size();
+	if (nv == 0 || ni < 3) return;
+	const bool have_kind = surface.colors.size() == nv;
+	const bool have_way = !hidden.empty() && surface.way_ids.size() == nv;
+	const Vector3 *v = surface.vertices.ptr();
+	const int32_t *idx = surface.indices.ptr();
+	out.verts = surface.vertices;
+	out.tris.reserve(ni);
+	for (int t = 0; t + 2 < ni; t += 3) {
+		const int32_t a = idx[t], b = idx[t + 1], c = idx[t + 2];
+		if (a < 0 || b < 0 || c < 0 || a >= nv || b >= nv || c >= nv) continue;
+		if (have_kind && s3d_kind_is_structure((int)std::lround(surface.colors[a].a * 255.0f))) continue;
+		if (have_way) {
+			const int64_t wid = surface.way_ids[a];
+			if (wid != 0 && hidden.count(wid)) continue;
+		}
+		const Vector3 &A = v[a], &B = v[b], &C = v[c];
+		// a footprint in the plane: vertical faces and slivers are skipped
+		const double area2 = ((double)B.x - A.x) * ((double)C.z - A.z) - ((double)B.z - A.z) * ((double)C.x - A.x);
+		if (std::abs(area2) < 1e-3) continue;
+		const int32_t ti = (int32_t)(out.tris.size() / 3);
+		out.tris.push_back(a);
+		out.tris.push_back(b);
+		out.tris.push_back(c);
+		const double minx = std::min((double)A.x, std::min((double)B.x, (double)C.x));
+		const double maxx = std::max((double)A.x, std::max((double)B.x, (double)C.x));
+		const double minz = std::min((double)A.z, std::min((double)B.z, (double)C.z));
+		const double maxz = std::max((double)A.z, std::max((double)B.z, (double)C.z));
+		const int cx0 = (int)std::floor(minx / SurfaceLookup::CELL_M), cx1 = (int)std::floor(maxx / SurfaceLookup::CELL_M);
+		const int cz0 = (int)std::floor(minz / SurfaceLookup::CELL_M), cz1 = (int)std::floor(maxz / SurfaceLookup::CELL_M);
+		for (int cx = cx0; cx <= cx1; cx++) {
+			for (int cz = cz0; cz <= cz1; cz++) {
+				out.cells[SurfaceLookup::cell_key(cx, cz)].push_back(ti);
+			}
+		}
+	}
+}
+
+double S3DRoadManager::surface_height_at(double e, double n, double h_hint, double tol_m) const
+{
+	double best = std::numeric_limits<double>::quiet_NaN();
+	for (size_t gi = 0; gi < manifests.size(); gi++) {
+		const ManifestGroup &group = manifests[gi];
+		if (!group.elevation_baked || group.tile_m <= 0.0) continue;
+		const long long te = (long long)(std::floor(e / group.tile_m) * group.tile_m);
+		const long long tn = (long long)(std::floor(n / group.tile_m) * group.tile_m);
+		const std::string key = std::to_string(gi) + ":" + std::to_string(te) + "_" + std::to_string(tn);
+		auto it = tiles.find(key);
+		if (it == tiles.end()) continue;
+		const TileState &st = it->second;
+		if (!st.loaded || st.no_data || st.lookup.empty()) continue;
+		const double x = st.anchor_e - e, z = n - st.anchor_n;
+		auto cit = st.lookup.cells.find(SurfaceLookup::cell_key((int)std::floor(x / SurfaceLookup::CELL_M), (int)std::floor(z / SurfaceLookup::CELL_M)));
+		if (cit == st.lookup.cells.end()) continue;
+		const Vector3 *v = st.lookup.verts.ptr();
+		const int32_t *tris = st.lookup.tris.data();
+		// the tile is a tangent plane at its centre: a baked vertex is drawn this much above the ellipsoid height its Y says
+		const double sag = frame.sag(x - (st.anchor_e - st.center_e), z - (st.center_n - st.anchor_n));
+		for (int32_t ti : cit->second) {
+			const Vector3 &A = v[tris[3 * ti]], &B = v[tris[3 * ti + 1]], &C = v[tris[3 * ti + 2]];
+			// edge functions = barycentric weights x the signed double area
+			const double wc = ((double)B.x - A.x) * (z - A.z) - ((double)B.z - A.z) * (x - A.x);
+			const double wa = ((double)C.x - B.x) * (z - B.z) - ((double)C.z - B.z) * (x - B.x);
+			const double wb = ((double)A.x - C.x) * (z - C.z) - ((double)A.z - C.z) * (x - C.x);
+			const double area = wa + wb + wc;
+			if (std::abs(area) < 1e-9) continue;
+			const double eps = 1e-4 * std::abs(area);   // a point on a shared edge belongs to both
+			if (area > 0.0 ? (wa < -eps || wb < -eps || wc < -eps) : (wa > eps || wb > eps || wc > eps)) continue;
+			const double y = (wa * A.y + wb * B.y + wc * C.y) / area + st.root_y + sag;
+			if (std::abs(y - h_hint) > tol_m) continue;
+			if (std::isnan(best) || y > best) best = y;
+		}
+	}
+	return best;
+}
+
 // ── Bind methods ────────────────────────────────────────────────────────────
 
 void S3DRoadManager::_bind_methods()
@@ -910,6 +1002,7 @@ void S3DRoadManager::_bind_methods()
 	ClassDB::bind_method(D_METHOD("reload_tiles"), &S3DRoadManager::reload_tiles);
 	ClassDB::bind_method(D_METHOD("set_hidden_ways", "ids"), &S3DRoadManager::set_hidden_ways);
 	ClassDB::bind_method(D_METHOD("get_hidden_ways"), &S3DRoadManager::get_hidden_ways);
+	ClassDB::bind_method(D_METHOD("surface_height_at", "e", "n", "h_hint", "tol_m"), &S3DRoadManager::surface_height_at);
 
 	ClassDB::bind_method(D_METHOD("set_road_path", "path"), &S3DRoadManager::set_road_path);
 	ClassDB::bind_method(D_METHOD("get_road_path"), &S3DRoadManager::get_road_path);
