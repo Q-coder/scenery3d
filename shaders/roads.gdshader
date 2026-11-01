@@ -119,12 +119,13 @@ void fragment() {
 		rough = 0.6;
 		spec = 0.2;
 	} else if (kind == 16) {
-		// embankment: the terrain's own flat green and material response
-		// (S3DTileManager's shared StandardMaterial3D: albedo, roughness 1,
-		// specular 0.5), so the strip is not distinguishable by shade
-		base = vec3(0.45, 0.55, 0.35);
+		// embankment: matte, in the tone the base tier's ground renders
+		// (measured against the ortho-textured terrain beside it: the old
+		// 0.45 / 0.55 / 0.35 with specular 0.5 mirrored the sky and read as
+		// a pale blue-grey slab beside the ground it is meant to continue)
+		base = vec3(0.40, 0.50, 0.23);
 		rough = 1.0;
-		spec = 0.5;
+		spec = 0.0;
 	} else if (kind == 13) {
 		// water: dark blue-green, glossy
 		base = mix(vec3(0.10, 0.22, 0.30), vec3(0.14, 0.30, 0.38), n1);
@@ -165,8 +166,10 @@ void fragment() {
 		metal = 0.7 * head;
 		spec = mix(0.2, 0.6, head);
 	} else {
-		// asphalt with fine grain
-		base = base * (0.85 + 0.3 * n1) * (0.92 + 0.16 * n2);
+		// asphalt with fine grain. The broad variation (n1) is kept low: a
+		// junction patch or a block has its own UV origin, and a strong
+		// large-scale pattern made every such boundary a visible seam
+		base = base * (0.94 + 0.12 * n1) * (0.92 + 0.16 * n2);
 		if (kind == 1) {
 			// one-way carriageway: hard shoulder on the right, lanes to its left
 			float right_edge = half_w - LANE_MARGIN - SHOULDER;
