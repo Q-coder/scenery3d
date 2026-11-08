@@ -351,6 +351,7 @@ void S3DVegetationManager::prepare_card_assets()
 		card_material->set_shader_parameter("species_count", (int)species.size());
 		card_material->set_shader_parameter("fade_begin_m", far_range_m * 0.8);
 		card_material->set_shader_parameter("fade_end_m", far_range_m);
+		card_material->set_shader_parameter("wind", std::clamp(wind_speed_mps / 12.0, 0.0, 1.0) * 0.03);
 	} else {
 		UtilityFunctions::push_warning("S3DVegetationManager: shaders/tree.gdshader not found; cards draw untextured");
 	}
@@ -698,6 +699,8 @@ void S3DVegetationManager::_bind_methods()
 	ClassDB::bind_method(D_METHOD("set_elevation_db", "db"), &S3DVegetationManager::set_elevation_db);
 	ClassDB::bind_method(D_METHOD("get_elevation_db"), &S3DVegetationManager::get_elevation_db);
 	ClassDB::bind_method(D_METHOD("set_snap_to_terrain", "on"), &S3DVegetationManager::set_snap_to_terrain);
+	ClassDB::bind_method(D_METHOD("set_wind_speed_mps", "v"), &S3DVegetationManager::set_wind_speed_mps);
+	ClassDB::bind_method(D_METHOD("get_wind_speed_mps"), &S3DVegetationManager::get_wind_speed_mps);
 	ClassDB::bind_method(D_METHOD("get_snap_to_terrain"), &S3DVegetationManager::get_snap_to_terrain);
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "snap_to_terrain"), "set_snap_to_terrain", "get_snap_to_terrain");
 	ClassDB::bind_method(D_METHOD("get_card_mesh"), &S3DVegetationManager::get_card_mesh);
@@ -783,6 +786,13 @@ void S3DVegetationManager::set_far_range_m(double v)
 }
 void S3DVegetationManager::set_far_fraction(double v) { far_fraction = std::clamp(v, 0.02, 1.0); clear_loaded_tiles(); }
 void S3DVegetationManager::set_far_scale(double v) { far_scale = std::clamp(v, 1.0, 4.0); clear_loaded_tiles(); }
+void S3DVegetationManager::set_wind_speed_mps(double v)
+{
+	wind_speed_mps = std::max(0.0, v);
+	if (card_material.is_valid()) {
+		card_material->set_shader_parameter("wind", std::clamp(wind_speed_mps / 12.0, 0.0, 1.0) * 0.03);
+	}
+}
 Ref<Mesh> S3DVegetationManager::get_card_mesh() { prepare_card_assets(); return card_mesh; }
 Dictionary S3DVegetationManager::tile_stats(int tile_e, int tile_n) const
 {

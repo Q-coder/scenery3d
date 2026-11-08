@@ -144,6 +144,7 @@ namespace s3d
 		godot::Ref<S3DElevationDB> elevation_db;
 		bool snap_to_terrain = true;
 		uint64_t snap_epoch = 0;
+		double wind_speed_mps = 0.0;
 		void resnap_pending_tiles();
 		struct Species {
 			std::string name;
@@ -213,6 +214,9 @@ namespace s3d
 		void set_elevation_db(const godot::Ref<S3DElevationDB> &db) { elevation_db = db; }
 		godot::Ref<S3DElevationDB> get_elevation_db() const { return elevation_db; }
 		void set_snap_to_terrain(bool on) { snap_to_terrain = on; clear_loaded_tiles(); }
+		// Sway amplitude from the weather's wind: none in calm air, full at 12 m/s.
+		void set_wind_speed_mps(double v);
+		double get_wind_speed_mps() const { return wind_speed_mps; }
 		bool get_snap_to_terrain() const { return snap_to_terrain; }
 		bool get_card_mode() const { return card_mode; }
 		void set_atlas_path(const godot::String &p);
