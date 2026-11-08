@@ -114,6 +114,23 @@ namespace s3d
 
 		std::vector<std::vector<ManifestEntry>> manifests;  // by group
 		bool manifest_loaded = false;
+		// The directory scan runs on its own thread (750 000 forest files
+		// over the baked regions took the main thread for a minute at Fly!),
+		// and a grid index keyed by the square lets update_tiles look up only
+		// the squares around the camera instead of walking every entry.
+		std::thread manifest_thread;
+		std::atomic<bool> manifest_scanning{false};
+		std::atomic<bool> manifest_ready{false};
+		int manifest_generation = 0;                 // bumped when the paths change; a stale scan is dropped
+		int manifest_scan_generation = -1;
+		std::vector<std::vector<ManifestEntry>> manifests_pending;
+		double manifest_scan_ms = 0.0;
+		std::unordered_map<uint64_t, std::vector<std::pair<int, int>>> grid;   // square key -> (group, index)
+		std::unordered_map<uint64_t, std::vector<std::pair<int, int>>> grid_pending;
+		static void scan_manifests(const std::vector<std::string> &dirs, std::vector<std::vector<ManifestEntry>> &out);
+		// the derived data (corridor paths, stand-downs, grid) on the scanned groups: thread-safe, pure data
+		static void derive_manifests(std::vector<std::vector<ManifestEntry>> &groups, std::unordered_map<uint64_t, std::vector<std::pair<int, int>>> &grid_out);
+		static uint64_t square_key(int e, int n) { return ((uint64_t)(uint32_t)e << 32) | (uint32_t)n; }
 
 		// Tile state keyed by "<group_index>:<tile_e>_<tile_n>".
 		std::unordered_map<std::string, TileState> tiles;
@@ -278,6 +295,9 @@ namespace s3d
 		godot::Dictionary tile_stats(int tile_e, int tile_n) const;
 		// Loaded tiles still waiting for terrain heights (or rebuilding).
 		int pending_tile_count() const;
+		bool is_manifest_loaded() const { return manifest_loaded; }
+		int get_manifest_entry_count() const;
+		double get_manifest_scan_ms() const { return manifest_scan_ms; }
 		void set_debug_keep_positions(bool on) { debug_keep_positions = on; }
 		bool get_debug_keep_positions() const { return debug_keep_positions; }
 		// dx, dz pairs of the near set of the tile (debug_keep_positions on).

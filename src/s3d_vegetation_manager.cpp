@@ -13,6 +13,9 @@
 #include <godot_cpp/classes/shader.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
+#include <filesystem>
+#include <chrono>
+#include <godot_cpp/classes/project_settings.hpp>
 #include <algorithm>
 #include <cstdlib>
 #include <cmath>
@@ -39,6 +42,7 @@ S3DVegetationManager::S3DVegetationManager() = default;
 
 S3DVegetationManager::~S3DVegetationManager()
 {
+	if (manifest_thread.joinable()) manifest_thread.join();
 	stop_worker();
 	tiles.clear();
 }
@@ -190,66 +194,104 @@ void S3DVegetationManager::worker_func()
 
 // ── Manifest discovery ──────────────────────────────────────────────────────
 
-void S3DVegetationManager::load_manifests()
+// The directory scan, off the main thread (std::filesystem: no Godot
+// objects touched). vegetation_{E}_{N}.bin / forest_{E}_{N}.bin only.
+void S3DVegetationManager::scan_manifests(const std::vector<std::string> &dirs, std::vector<std::vector<ManifestEntry>> &out)
 {
-	manifests.clear();
-	for (int i = 0; i < vegetation_paths.size(); i++) {
-		String dir = vegetation_paths[i];
+	out.clear();
+	for (const std::string &dir : dirs) {
 		std::vector<ManifestEntry> group;
-
-		Ref<DirAccess> da = DirAccess::open(dir);
-		if (da.is_null()) {
-			UtilityFunctions::printerr("S3DVegetationManager: cannot open dir ", dir);
-			manifests.push_back(group);
+		std::error_code ec;
+		// index.txt (written by the bake: "E N f|v" per tile) spares the listing
+		// of a region's hundreds of thousands of files
+		{
+			std::ifstream idx(dir + "/index.txt");
+			if (idx.is_open()) {
+				std::string line;
+				while (std::getline(idx, line)) {
+					int te = 0, tn = 0;
+					char kind = 0;
+					if (std::sscanf(line.c_str(), "%d %d %c", &te, &tn, &kind) != 3) continue;
+					ManifestEntry e;
+					e.forest = kind == 'f';
+					e.path = dir + "/" + (e.forest ? "forest_" : "vegetation_") + std::to_string(te) + "_" + std::to_string(tn) + ".bin";
+					e.tile_e = te;
+					e.tile_n = tn;
+					group.push_back(e);
+				}
+				out.push_back(group);
+				continue;
+			}
+		}
+		std::filesystem::directory_iterator it(dir, ec);
+		if (ec) {
+			out.push_back(group);
 			continue;
 		}
-		da->list_dir_begin();
-		String name;
-		while (true) {
-			name = da->get_next();
-			if (name.is_empty()) break;
-			if (da->current_is_dir()) continue;
-			const bool is_forest = name.begins_with("forest_");
-			if ((!name.begins_with("vegetation_") && !is_forest) || !name.ends_with(".bin")) continue;
-			// vegetation_{E}_{N}.bin / forest_{E}_{N}.bin
-			String stem = name.substr(0, name.length() - 4);
-			PackedStringArray parts = stem.split("_");
-			if (parts.size() < 3) continue;
+		for (const auto &entry : it) {
+			if (!entry.is_regular_file(ec)) continue;
+			const std::string name = entry.path().filename().string();
+			const bool is_forest = name.rfind("forest_", 0) == 0;
+			const bool is_veg = name.rfind("vegetation_", 0) == 0;
+			if ((!is_veg && !is_forest) || name.size() < 5 || name.compare(name.size() - 4, 4, ".bin") != 0) continue;
+			const size_t us2 = name.rfind('_');
+			const size_t us1 = us2 == std::string::npos ? std::string::npos : name.rfind('_', us2 - 1);
+			if (us1 == std::string::npos) continue;
 			ManifestEntry e;
-			e.path = String(dir + "/" + name).utf8().get_data();
-			e.tile_e = parts[parts.size() - 2].to_int();
-			e.tile_n = parts[parts.size() - 1].to_int();
+			e.path = entry.path().string();
+			e.tile_e = std::atoi(name.substr(us1 + 1, us2 - us1 - 1).c_str());
+			e.tile_n = std::atoi(name.substr(us2 + 1, name.size() - 4 - us2 - 1).c_str());
 			e.forest = is_forest;
 			group.push_back(e);
 		}
-		da->list_dir_end();
-		manifests.push_back(group);
+		out.push_back(group);
 	}
+}
+
+// Corridor paths, stand-downs and the square -> (group, index) grid, on the
+// scan thread.
+void S3DVegetationManager::derive_manifests(std::vector<std::vector<ManifestEntry>> &groups, std::unordered_map<uint64_t, std::vector<std::pair<int, int>>> &grid_out)
+{
 	// Per square: every forest file's corridors apply to every entry of the
 	// square, and a polygon fill stands down where a surveyed tree tile exists.
 	std::unordered_map<uint64_t, std::vector<std::string>> forest_paths;
 	std::unordered_set<uint64_t> surveyed;
-	auto key_of = [](int e, int n) { return ((uint64_t)(uint32_t)e << 32) | (uint32_t)n; };
-	for (const auto &group : manifests) {
+	for (const auto &group : groups) {
 		for (const auto &e : group) {
-			if (e.forest) forest_paths[key_of(e.tile_e, e.tile_n)].push_back(e.path);
-			else surveyed.insert(key_of(e.tile_e, e.tile_n));
+			if (e.forest) forest_paths[square_key(e.tile_e, e.tile_n)].push_back(e.path);
+			else surveyed.insert(square_key(e.tile_e, e.tile_n));
 		}
 	}
 	// The same square's forest file in several packs (a pack and its build
 	// dir both in the library) fills once: the first group, the rest only
 	// contribute corridors.
 	std::unordered_set<uint64_t> filled;
-	for (auto &group : manifests) {
-		for (auto &e : group) {
-			const uint64_t k = key_of(e.tile_e, e.tile_n);
+	grid_out.clear();
+	for (size_t gi = 0; gi < groups.size(); gi++) {
+		for (size_t i = 0; i < groups[gi].size(); i++) {
+			ManifestEntry &e = groups[gi][i];
+			const uint64_t k = square_key(e.tile_e, e.tile_n);
 			auto it = forest_paths.find(k);
 			if (it != forest_paths.end()) e.corridor_paths = it->second;
 			if (e.forest && (surveyed.count(k) || filled.count(k))) e.trees_disabled = true;
 			if (e.forest && !e.trees_disabled) filled.insert(k);
+			grid_out[k].push_back({(int)gi, (int)i});
 		}
 	}
+}
+
+int S3DVegetationManager::get_manifest_entry_count() const
+{
+	int n = 0;
+	for (const auto &g : manifests) n += (int)g.size();
+	return n;
+}
+
+// Called on the main thread once a scan has landed.
+void S3DVegetationManager::load_manifests()
+{
 	manifest_loaded = true;
+	UtilityFunctions::print("S3DVegetationManager: ", get_manifest_entry_count(), " tiles in ", (int)manifests.size(), " dir(s), scanned and indexed in ", (int)manifest_scan_ms, " ms");
 }
 
 // ── Tile streaming ──────────────────────────────────────────────────────────
@@ -268,15 +310,22 @@ void S3DVegetationManager::update_tiles(Vector3 camera_pos)
 	int unload_r2 = unload_r * unload_r;
 
 	std::unordered_set<std::string> wanted;
-
-	for (size_t gi = 0; gi < manifests.size(); gi++) {
-		for (const auto &e : manifests[gi]) {
-			double cx = e.tile_e + 512.0;
-			double cy = e.tile_n + 512.0;
-			double dx = cx - cam_e;
-			double dy = cy - cam_n;
-			double d2 = dx * dx + dy * dy;
-			if (d2 > load_r2) continue;
+	// Only the squares inside the radius are looked up (grid index); the
+	// manifests themselves may hold a million entries across the regions.
+	const int e_lo = (int)std::floor((cam_e - radius) / 1024.0) * 1024;
+	const int e_hi = (int)std::floor((cam_e + radius) / 1024.0) * 1024;
+	const int n_lo = (int)std::floor((cam_n - radius) / 1024.0) * 1024;
+	const int n_hi = (int)std::floor((cam_n + radius) / 1024.0) * 1024;
+	for (int te = e_lo; te <= e_hi; te += 1024) {
+		for (int tn = n_lo; tn <= n_hi; tn += 1024) {
+			auto git = grid.find(square_key(te, tn));
+			if (git == grid.end()) continue;
+			const double dx = te + 512.0 - cam_e;
+			const double dy = tn + 512.0 - cam_n;
+			if (dx * dx + dy * dy > load_r2) continue;
+			for (const auto &gi_idx : git->second) {
+			const size_t gi = (size_t)gi_idx.first;
+			const ManifestEntry &e = manifests[gi][(size_t)gi_idx.second];
 
 			char key[64];
 			std::snprintf(key, sizeof(key), "%zu:%d_%d", gi, e.tile_e, e.tile_n);
@@ -299,6 +348,7 @@ void S3DVegetationManager::update_tiles(Vector3 camera_pos)
 				}
 				work_cv.notify_one();
 				tiles[id].loading = true;
+			}
 			}
 		}
 	}
@@ -809,8 +859,40 @@ void S3DVegetationManager::process_load_results()
 void S3DVegetationManager::_process(double /*delta*/)
 {
 	if (!manifest_loaded) {
-		load_manifests();
-		start_worker();
+		if (manifest_scanning.load()) {
+			if (manifest_ready.load()) {
+				if (manifest_thread.joinable()) manifest_thread.join();
+				manifest_scanning.store(false);
+				manifest_ready.store(false);
+				if (manifest_scan_generation == manifest_generation) {
+					manifests.swap(manifests_pending);
+					manifests_pending.clear();
+					grid.swap(grid_pending);
+					grid_pending.clear();
+					load_manifests();
+					start_worker();
+				}
+				// a stale scan (the paths changed meanwhile) is dropped; the next frame starts a fresh one
+			}
+		} else {
+			std::vector<std::string> dirs;
+			for (int i = 0; i < vegetation_paths.size(); i++) {
+				String d = vegetation_paths[i];
+				if (d.begins_with("res://") || d.begins_with("user://")) d = ProjectSettings::get_singleton()->globalize_path(d);
+				dirs.push_back(d.utf8().get_data());
+			}
+			manifest_scan_generation = manifest_generation;
+			manifest_scanning.store(true);
+			manifest_ready.store(false);
+			manifest_thread = std::thread([this, dirs]() {
+				const auto t0 = std::chrono::steady_clock::now();
+				scan_manifests(dirs, manifests_pending);
+				derive_manifests(manifests_pending, grid_pending);
+				manifest_scan_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+				manifest_ready.store(true);
+			});
+		}
+		if (!manifest_loaded) return;
 	}
 
 	Camera3D *cam = get_viewport() ? get_viewport()->get_camera_3d() : nullptr;
@@ -977,6 +1059,9 @@ void S3DVegetationManager::_bind_methods()
 	ClassDB::bind_method(D_METHOD("tile_instance_counts", "tile_e", "tile_n"), &S3DVegetationManager::tile_instance_counts);
 	ClassDB::bind_method(D_METHOD("tile_stats", "tile_e", "tile_n"), &S3DVegetationManager::tile_stats);
 	ClassDB::bind_method(D_METHOD("pending_tile_count"), &S3DVegetationManager::pending_tile_count);
+	ClassDB::bind_method(D_METHOD("is_manifest_loaded"), &S3DVegetationManager::is_manifest_loaded);
+	ClassDB::bind_method(D_METHOD("get_manifest_entry_count"), &S3DVegetationManager::get_manifest_entry_count);
+	ClassDB::bind_method(D_METHOD("get_manifest_scan_ms"), &S3DVegetationManager::get_manifest_scan_ms);
 	ClassDB::bind_method(D_METHOD("set_debug_keep_positions", "on"), &S3DVegetationManager::set_debug_keep_positions);
 	ClassDB::bind_method(D_METHOD("get_debug_keep_positions"), &S3DVegetationManager::get_debug_keep_positions);
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "debug_keep_positions"), "set_debug_keep_positions", "get_debug_keep_positions");
@@ -1007,6 +1092,8 @@ void S3DVegetationManager::set_vegetation_paths(const PackedStringArray &p_paths
 {
 	vegetation_paths = p_paths;
 	manifest_loaded = false;
+	manifest_generation++;   // a scan in flight is dropped when it lands
+	clear_loaded_tiles();
 }
 PackedStringArray S3DVegetationManager::get_vegetation_paths() const { return vegetation_paths; }
 
