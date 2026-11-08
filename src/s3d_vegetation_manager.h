@@ -5,11 +5,14 @@
 #include <godot_cpp/classes/multi_mesh.hpp>
 #include <godot_cpp/classes/multi_mesh_instance3d.hpp>
 #include <godot_cpp/classes/mesh.hpp>
+#include <godot_cpp/classes/shader_material.hpp>
+#include <godot_cpp/classes/texture2d.hpp>
 #include <godot_cpp/classes/ref.hpp>
 
 #include <unordered_map>
 #include "s3d_frame.h"
 #include "s3d_exclusion.h"
+#include "s3d_elevation_db.h"
 #include <unordered_set>
 #include <vector>
 #include <deque>
@@ -54,10 +57,20 @@ namespace s3d
 		};
 
 		struct TileState {
-			godot::MultiMeshInstance3D *node = nullptr;
+			godot::MultiMeshInstance3D *node = nullptr;      // every kept tree (card mode: the near set)
+			godot::MultiMeshInstance3D *far_node = nullptr;  // card mode: the thinned far set
 			bool loading = false;
 			bool loaded = false;
 			bool no_data = false;
+			// CPU-side statistics of the near set (tests; the headless renderer keeps no instance data)
+			std::vector<int> species_counts;
+			float min_height = 0.0f, max_height = 0.0f;
+			int low_conifers = 0, high_conifers = 0;   // species picks below 700 m / above 1 300 m
+			int low_total = 0, high_total = 0;
+			float far_height_ratio = 0.0f;
+			int snapped = 0;                 // trees placed on the terrain's height instead of the record's
+			float ground_min = 0.0f, ground_max = 0.0f;
+			bool snap_pending = false;       // terrain not loaded yet when built: rebuild when it arrives
 		};
 
 		// vegetation_{E}_{N}.bin index per configured directory.
@@ -109,6 +122,42 @@ namespace s3d
 		// Fraction of trees per tile to actually render (0..1). Selection is
 		// deterministic per tile, so toggling at runtime gives a stable subset.
 		double density_fraction = 1.0;
+		// ── Card mode (docs/WORLD_SCENERY_DESIGN.md §14) ───────────────────
+		// Instead of `tree_mesh`, every tree is three vertical quads and a
+		// canopy quad (8 triangles) textured from a species atlas (columns =
+		// species, upper row side view, lower row top view) through
+		// shaders/tree.gdshader. Per tile two MultiMeshes: the near set
+		// (every kept tree, visible to near_range_m) and the far set (every
+		// 1/far_fraction-th tree at far_scale, near_range_m .. far_range_m).
+		bool card_mode = false;
+		godot::String atlas_path = "res://trees/tree_atlas.png";
+		godot::String atlas_meta_path = "res://trees/tree_atlas.json";
+		double near_range_m = 2500.0;
+		double far_range_m = 8000.0;
+		double far_fraction = 0.25;
+		double far_scale = 1.6;
+		int results_per_frame = 3;
+		// The host's terrain heights (Scenery3D.get_elevation_db()): in card
+		// mode every tree stands on the terrain that is actually drawn, not
+		// on the record's ground height from another DEM (SwissTopo 1 m
+		// records over the SRTM base tier sat metres under the surface).
+		godot::Ref<S3DElevationDB> elevation_db;
+		bool snap_to_terrain = true;
+		uint64_t snap_epoch = 0;
+		void resnap_pending_tiles();
+		struct Species {
+			std::string name;
+			bool conifer = false;
+			double height_m = 20.0;
+			double crown_ratio = 0.6;   // crown width / height of the card
+		};
+		std::vector<Species> species;
+		godot::Ref<godot::Mesh> card_mesh;
+		godot::Ref<godot::ShaderMaterial> card_material;
+		bool card_assets_ready = false;
+		void prepare_card_assets();
+		int pick_species(uint32_t hash, float ground_z) const;
+		godot::MultiMeshInstance3D *make_instances(const LoadResult &result, const std::vector<size_t> &indices, double scale_mul, const char *suffix, TileState *stats);
 
 		// Last camera position.
 		double last_cam_e = 0;
@@ -160,6 +209,31 @@ namespace s3d
 		double get_density_fraction() const;
 
 		int get_active_tile_count() const;
+		void set_card_mode(bool on);
+		void set_elevation_db(const godot::Ref<S3DElevationDB> &db) { elevation_db = db; }
+		godot::Ref<S3DElevationDB> get_elevation_db() const { return elevation_db; }
+		void set_snap_to_terrain(bool on) { snap_to_terrain = on; clear_loaded_tiles(); }
+		bool get_snap_to_terrain() const { return snap_to_terrain; }
+		bool get_card_mode() const { return card_mode; }
+		void set_atlas_path(const godot::String &p);
+		godot::String get_atlas_path() const { return atlas_path; }
+		void set_atlas_meta_path(const godot::String &p);
+		godot::String get_atlas_meta_path() const { return atlas_meta_path; }
+		void set_near_range_m(double v);
+		double get_near_range_m() const { return near_range_m; }
+		void set_far_range_m(double v);
+		double get_far_range_m() const { return far_range_m; }
+		void set_far_fraction(double v);
+		double get_far_fraction() const { return far_fraction; }
+		void set_far_scale(double v);
+		double get_far_scale() const { return far_scale; }
+		int get_species_count() { prepare_card_assets(); return (int)species.size(); }
+		// The card mesh (8 triangles, unit height, unit crown width) — tests.
+		godot::Ref<godot::Mesh> get_card_mesh();
+		// Per-tile instance counts of the tile at grid (east, north): [near, far]; empty when not loaded.
+		godot::PackedInt32Array tile_instance_counts(int tile_e, int tile_n) const;
+		// {near, far, species: [count per species], min_height, max_height, low_conifers, low_total, high_conifers, high_total, far_height_ratio}
+		godot::Dictionary tile_stats(int tile_e, int tile_n) const;
 
 		void set_exclusion_zones(const godot::Array &zones);
 		godot::Array get_exclusion_zones() const;
