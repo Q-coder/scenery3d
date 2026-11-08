@@ -24,6 +24,12 @@ namespace s3d
 
 	private:
 		godot::HashMap<uint64_t, TileData> tiles;
+		// A coarse copy (<= 65 px) of EVERY loaded terrain tile, kept while
+		// the tile is loaded: enough for placing trees anywhere inside the
+		// terrain radius (4 KB each), while `tiles` holds the full heightmaps
+		// of the near tiles only, the ones roads and water drape on.
+		godot::HashMap<uint64_t, TileData> coarse;
+		double sample(const TileData &td, int tile_x, int tile_z, double lv95_e, double lv95_n) const;
 		int tile_size = 1024;
 		double origin_east = 2600000.0;
 		double origin_north = 1200000.0;
@@ -52,6 +58,12 @@ namespace s3d
 		void load_tile(int tile_x, int tile_z, godot::Ref<godot::Image> heightmap);
 		void unload_tile(int tile_x, int tile_z);
 		bool has_tile(int tile_x, int tile_z) const;
+		void load_coarse_tile(int tile_x, int tile_z, godot::Ref<godot::Image> heightmap);
+		void unload_coarse_tile(int tile_x, int tile_z);
+		// Fine or coarse data for the tile.
+		bool has_any_tile(int tile_x, int tile_z) const;
+		// Grid query from the fine tile when loaded, else the coarse copy, else NaN.
+		double get_elevation_grid_any(double e, double n) const;
 
 		// Flat-frame query (world x/z around origin_*), legacy hosts.
 		double get_elevation(double x, double z) const;

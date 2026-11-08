@@ -391,6 +391,15 @@ MultiMeshInstance3D *S3DVegetationManager::make_instances(const LoadResult &resu
 		stats->snap_pending = false;
 	}
 	const bool snap = card_mode && snap_to_terrain && elevation_db.is_valid();
+	// A tile waits for terrain only while its own terrain tile is absent; a
+	// tree whose point falls into a neighbouring cell without data keeps the
+	// record's height instead of re-queuing the tile at every terrain update.
+	if (snap && stats) {
+		const int ts = std::max(1, elevation_db->get_tile_size());
+		if (!elevation_db->has_any_tile((int)std::floor((result.tile_east + 512.0) / ts), (int)std::floor((result.tile_north + 512.0) / ts))) {
+			stats->snap_pending = true;
+		}
+	}
 	Ref<MultiMesh> mm;
 	mm.instantiate();
 	mm->set_transform_format(MultiMesh::TRANSFORM_3D);
@@ -409,10 +418,8 @@ MultiMeshInstance3D *S3DVegetationManager::make_instances(const LoadResult &resu
 		const float wz = t.dz;
 		float wy = t.ground_z;
 		if (snap) {
-			const double h = elevation_db->get_elevation_grid(result.tile_east + (double)t.dx, result.tile_north + (double)t.dz);
-			if (std::isnan(h)) {
-				if (stats) stats->snap_pending = true;
-			} else {
+			const double h = elevation_db->get_elevation_grid_any(result.tile_east + (double)t.dx, result.tile_north + (double)t.dz);
+			if (!std::isnan(h)) {
 				wy = (float)h;
 				if (stats) stats->snapped++;
 			}
@@ -609,7 +616,7 @@ void S3DVegetationManager::resnap_pending_tiles()
 		if (colon == std::string::npos || under == std::string::npos) { ++it; continue; }
 		const int te = std::stoi(id.substr(colon + 1, under - colon - 1));
 		const int tn = std::stoi(id.substr(under + 1));
-		if (!elevation_db->has_tile((int)std::floor((te + 512.0) / ts), (int)std::floor((tn + 512.0) / ts))) { ++it; continue; }
+		if (!elevation_db->has_any_tile((int)std::floor((te + 512.0) / ts), (int)std::floor((tn + 512.0) / ts))) { ++it; continue; }
 		// rebuild in place: the old nodes stay on screen until the new ones land
 		std::string path;
 		const int gi = std::atoi(id.substr(0, colon).c_str());
@@ -739,6 +746,7 @@ void S3DVegetationManager::_bind_methods()
 	ClassDB::bind_method(D_METHOD("get_card_mesh"), &S3DVegetationManager::get_card_mesh);
 	ClassDB::bind_method(D_METHOD("tile_instance_counts", "tile_e", "tile_n"), &S3DVegetationManager::tile_instance_counts);
 	ClassDB::bind_method(D_METHOD("tile_stats", "tile_e", "tile_n"), &S3DVegetationManager::tile_stats);
+	ClassDB::bind_method(D_METHOD("pending_tile_count"), &S3DVegetationManager::pending_tile_count);
 }
 
 void S3DVegetationManager::clear_loaded_tiles()
@@ -863,6 +871,13 @@ Dictionary S3DVegetationManager::tile_stats(int tile_e, int tile_n) const
 		return out;
 	}
 	return out;
+}
+
+int S3DVegetationManager::pending_tile_count() const
+{
+	int n = 0;
+	for (const auto &kv : tiles) if (kv.second.loaded && (kv.second.snap_pending || kv.second.reloading)) n++;
+	return n;
 }
 
 PackedInt32Array S3DVegetationManager::tile_instance_counts(int tile_e, int tile_n) const

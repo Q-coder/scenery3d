@@ -40,6 +40,10 @@ void S3DElevationDB::_bind_methods()
 
 	ClassDB::bind_method(D_METHOD("get_elevation", "x", "z"), &S3DElevationDB::get_elevation);
 	ClassDB::bind_method(D_METHOD("get_elevation_grid", "e", "n"), &S3DElevationDB::get_elevation_grid);
+	ClassDB::bind_method(D_METHOD("load_coarse_tile", "tile_x", "tile_z", "heightmap"), &S3DElevationDB::load_coarse_tile);
+	ClassDB::bind_method(D_METHOD("unload_coarse_tile", "tile_x", "tile_z"), &S3DElevationDB::unload_coarse_tile);
+	ClassDB::bind_method(D_METHOD("has_any_tile", "tile_x", "tile_z"), &S3DElevationDB::has_any_tile);
+	ClassDB::bind_method(D_METHOD("get_elevation_grid_any", "e", "n"), &S3DElevationDB::get_elevation_grid_any);
 	ClassDB::bind_method(D_METHOD("get_elevation_safe", "x", "z", "default_val"), &S3DElevationDB::get_elevation_safe);
 }
 
@@ -90,6 +94,38 @@ void S3DElevationDB::load_tile(int tile_x, int tile_z, Ref<Image> heightmap)
 		") size ", td.width, "x", td.height);
 }
 
+void S3DElevationDB::load_coarse_tile(int tile_x, int tile_z, Ref<Image> heightmap)
+{
+	ERR_FAIL_COND_MSG(heightmap.is_null(), "S3DElevationDB::load_coarse_tile: heightmap is null.");
+	TileData td;
+	td.heightmap = heightmap;
+	td.width = heightmap->get_width();
+	td.height = heightmap->get_height();
+	coarse[_tile_key(tile_x, tile_z)] = td;
+	epoch++;
+}
+
+void S3DElevationDB::unload_coarse_tile(int tile_x, int tile_z)
+{
+	if (coarse.erase(_tile_key(tile_x, tile_z))) epoch++;
+}
+
+bool S3DElevationDB::has_any_tile(int tile_x, int tile_z) const
+{
+	const uint64_t key = _tile_key(tile_x, tile_z);
+	return tiles.has(key) || coarse.has(key);
+}
+
+double S3DElevationDB::get_elevation_grid_any(double lv95_e, double lv95_n) const
+{
+	const int tile_x = (int)floor(lv95_e / tile_size);
+	const int tile_z = (int)floor(lv95_n / tile_size);
+	const uint64_t key = _tile_key(tile_x, tile_z);
+	if (tiles.has(key)) return sample(tiles[key], tile_x, tile_z, lv95_e, lv95_n);
+	if (coarse.has(key)) return sample(coarse[key], tile_x, tile_z, lv95_e, lv95_n);
+	return std::nan("");
+}
+
 void S3DElevationDB::unload_tile(int tile_x, int tile_z)
 {
 	uint64_t key = _tile_key(tile_x, tile_z);
@@ -122,7 +158,11 @@ double S3DElevationDB::get_elevation_grid(double lv95_e, double lv95_n) const
 		return std::nan("");
 	}
 
-	const TileData &td = tiles[key];
+	return sample(tiles[key], tile_x, tile_z, lv95_e, lv95_n);
+}
+
+double S3DElevationDB::sample(const TileData &td, int tile_x, int tile_z, double lv95_e, double lv95_n) const
+{
 	int w = td.width;
 	int h = td.height;
 

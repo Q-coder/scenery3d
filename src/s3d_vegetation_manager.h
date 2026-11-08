@@ -245,6 +245,8 @@ namespace s3d
 		godot::PackedInt32Array tile_instance_counts(int tile_e, int tile_n) const;
 		// {near, far, species: [count per species], min_height, max_height, low_conifers, low_total, high_conifers, high_total, far_height_ratio}
 		godot::Dictionary tile_stats(int tile_e, int tile_n) const;
+		// Loaded tiles still waiting for terrain heights (or rebuilding).
+		int pending_tile_count() const;
 
 		void set_exclusion_zones(const godot::Array &zones);
 		godot::Array get_exclusion_zones() const;

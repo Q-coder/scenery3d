@@ -1394,6 +1394,19 @@ void S3DTileManager::process_load_results(int &verts_generated)
 		if (desired_lod < LOD_DISCARD_THRESHOLD && elevation_db.is_valid()) {
 			elevation_db->load_tile(result.ei, result.ni, heightmap);
 		}
+		// Every loaded tile also leaves a coarse copy (<= 65 px, 4 KB) in the
+		// database: the vegetation stands on the terrain out to the terrain
+		// radius instead of only inside the fine-LOD box (trees popped up at
+		// its edge, gery 2026-11-08). Roads and water keep draping on the
+		// fine tiles only.
+		if (elevation_db.is_valid()) {
+			Ref<Image> coarse_hm = heightmap;
+			if (heightmap->get_width() > 65 || heightmap->get_height() > 65) {
+				coarse_hm = heightmap->duplicate();
+				coarse_hm->resize(65, 65, Image::INTERPOLATE_BILINEAR);
+			}
+			elevation_db->load_coarse_tile(result.ei, result.ni, coarse_hm);
+		}
 
 		// Discard the heightmap of distant tiles to bound memory — only
 		// worth it for large tiles (a 1025 px tile is 4 MB; a 34 px base
@@ -1623,6 +1636,7 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 			if (state.node) {
 				if (elevation_db.is_valid()) {
 					elevation_db->unload_tile(state.node->get_tile_x(), state.node->get_tile_z());
+					elevation_db->unload_coarse_tile(state.node->get_tile_x(), state.node->get_tile_z());
 				}
 				state.node->queue_free();
 				bump_coverage();
@@ -2234,6 +2248,7 @@ void S3DTileManager::reload_tiles()
 		if (state.node) {
 			if (elevation_db.is_valid()) {
 				elevation_db->unload_tile(state.node->get_tile_x(), state.node->get_tile_z());
+				elevation_db->unload_coarse_tile(state.node->get_tile_x(), state.node->get_tile_z());
 			}
 			state.node->queue_free();
 		}
