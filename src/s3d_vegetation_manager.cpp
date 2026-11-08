@@ -404,7 +404,7 @@ void S3DVegetationManager::fill_polygons(const std::vector<ForestPolygon> &polys
 {
 	for (size_t pi = 0; pi < polys.size(); pi++) {
 		const ForestPolygon &poly = polys[pi];
-		if (poly.density <= 1e-6f) continue;
+		if (poly.kind > 2 || poly.density <= 1e-6f) continue;   // land cover (water, fields, towns) gets no trees
 		const float spacing = 1.0f / std::sqrt(poly.density);
 		const std::vector<float> &outer = poly.rings[0];
 		float minx = outer[0], maxx = outer[0], minz = outer[1], maxz = outer[1];

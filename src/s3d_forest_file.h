@@ -8,9 +8,11 @@
 //
 // File (little-endian): "FOR1", u32 1, u32 polygon count, u32 0, f64 tile
 // east, f64 tile north (SW corner, LV95-like metres); polygon: u8 kind
-// (0 broadleaf, 1 conifer, 2 mixed, 3 corridor), u8[3], f32 density (trees
-// per m2; corridor: half width m), f32 height m, u32 ring count; ring: u32 n,
-// n x (f32 dx east, f32 dz north) from the SW corner.
+// (0 broadleaf, 1 conifer, 2 mixed, 3 corridor, 4 water, 5 farmland, 6 grass,
+// 7 built-up, 8 industrial, 9 bare rock, 10 glacier, 11 sand), u8[3], f32
+// density (trees per m2; corridor: half width m; land cover 0), f32 height m,
+// u32 ring count; ring: u32 n, n x (f32 dx east, f32 dz north) from the SW
+// corner. Only kinds 0-2 get trees.
 
 #include <cstdint>
 #include <string>
@@ -23,7 +25,7 @@ struct S3DForestCorridor {
 };
 
 struct S3DForestPolygon {
-	int kind = 2;            // 0 broadleaf, 1 conifer, 2 mixed
+	int kind = 2;            // 0 broadleaf, 1 conifer, 2 mixed; land cover 4 water, 5 farmland, 6 grass, 7 built-up, 8 industrial, 9 rock, 10 glacier, 11 sand
 	float density = 1.0f / 36.0f;   // trees per m2
 	float height_m = 20.0f;
 	std::vector<std::vector<float>> rings;   // outer first, then holes; dx, dz pairs
@@ -40,11 +42,14 @@ constexpr uint8_t S3D_LANDCOVER_BASE_RGB[3] = { 115, 140, 89 };
 
 // px x px RGB8 land-cover raster of a square, in orthophoto orientation
 // (column 0 = east edge, row 0 = south edge; square_m metres per side): base
-// colour where no polygon, a forest green by kind with a little per-pixel
-// variation inside the polygons (holes stay base), and the corridors cleared
-// to base when the raster is fine enough to show them (px >= 64).
+// colour where no polygon; the polygons by kind — forests dark green, water,
+// farmland parcels, grass, built-up roofs on a street grid, industry, rock,
+// glacier, sand — as position-hashed patterns continuous across squares
+// (tile_east / tile_north place the square in the world; holes stay base);
+// the corridors as grey road lines when the raster is fine enough (px >= 64).
 void s3d_rasterise_landcover(const std::vector<S3DForestPolygon> &polys,
-	const std::vector<S3DForestCorridor> &corridors, int px, float square_m, std::vector<uint8_t> &rgb);
+	const std::vector<S3DForestCorridor> &corridors, int px, float square_m,
+	double tile_east, double tile_north, std::vector<uint8_t> &rgb);
 
 // px x px of the base colour.
 void s3d_fill_landcover_base(int px, std::vector<uint8_t> &rgb);

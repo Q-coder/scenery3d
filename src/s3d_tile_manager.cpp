@@ -185,6 +185,7 @@ std::vector<std::string> S3DTileManager::ortho_paths_for_tile(int ei, int ni, in
 // cards and the texture costs 48 KB. Far chunks paint 16 px per sub-tile like
 // the mip3 orthophotos.
 static constexpr int LANDCOVER_TILE_PX = 128;
+static constexpr int LANDCOVER_NEAR_PX = 256;   // 4 m/px for the close LODs (<= 4), where roofs and parcels are looked at
 static constexpr int LANDCOVER_CHUNK_PX = 16;
 
 std::vector<std::string> S3DTileManager::landcover_paths_for_tile(int ei, int ni) const
@@ -1073,10 +1074,11 @@ void S3DTileManager::worker_func()
 			// material, which is the same colour as the raster's base.
 			if (result.success && result.jpeg_bytes.empty() && result.ortho_rgb.empty() && !req.landcover_paths.empty()) {
 				std::vector<uint8_t> rgb;
-				if (s3d_landcover_raster(req.landcover_paths, LANDCOVER_TILE_PX, (float)req.tile_size, rgb)) {
+				const int lc_px = req.desired_lod <= 4 ? LANDCOVER_NEAR_PX : LANDCOVER_TILE_PX;
+				if (s3d_landcover_raster(req.landcover_paths, lc_px, (float)req.tile_size, rgb)) {
 					result.ortho_rgb = std::move(rgb);
-					result.ortho_rgb_w = LANDCOVER_TILE_PX;
-					result.ortho_pixels = LANDCOVER_TILE_PX;
+					result.ortho_rgb_w = lc_px;
+					result.ortho_pixels = lc_px;
 				}
 			}
 		}
