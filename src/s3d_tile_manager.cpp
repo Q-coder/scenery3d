@@ -7,6 +7,8 @@
 
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/classes/file_access.hpp>
+#include <godot_cpp/classes/resource_loader.hpp>
+#include <godot_cpp/variant/vector4.hpp>
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/classes/camera3d.hpp>
 #include <godot_cpp/classes/json.hpp>
@@ -811,6 +813,7 @@ void S3DTileManager::worker_func()
 								s3d_fill_landcover_base(LANDCOVER_CHUNK_PX, raw.rgb);
 							}
 							result.chunk_ortho_rgb[key] = std::move(raw);
+							result.landcover_painted = true;
 							continue;
 						}
 						result.chunk_ortho_jpegs[key] = std::move(jbuf);
@@ -1213,7 +1216,7 @@ void S3DTileManager::process_load_results(int &verts_generated)
 						// the no-data margins from the chunk's real pixels.
 						PackedByteArray cd = comp_img->get_data();
 						const int64_t valid = ortho_fill_nodata(cd, comp_size, comp_size);
-						if (valid * 10 < (int64_t)comp_size * comp_size) {
+						if (valid * 10 < (int64_t)comp_size * comp_size && !result.landcover_painted) {
 							chunk_outside = true;
 						} else {
 							comp_img = Image::create_from_data(comp_size, comp_size, false, Image::FORMAT_RGB8, cd);
@@ -1225,22 +1228,16 @@ void S3DTileManager::process_load_results(int &verts_generated)
 						continue;
 					}
 					if (any_decoded) {
+						// Mipmaps: the 16 px per square land cover is high
+						// contrast and shimmers at grazing angles without them.
+						comp_img->generate_mipmaps();
 						Ref<ImageTexture> tex = ImageTexture::create_from_image(comp_img);
-						Ref<StandardMaterial3D> mat;
-						mat.instantiate();
-						mat->set_texture(StandardMaterial3D::TEXTURE_ALBEDO, tex);
-						mat->set_cull_mode(StandardMaterial3D::CULL_DISABLED);
-						// Clamp to edge: with repeat enabled (the default) the
-						// mip/anisotropic sampler wraps past the [0,1] UV edge to
-						// the opposite side of the texture, bleeding the wrong
-						// pixels in as a visible seam between adjacent chunks.
-						mat->set_flag(BaseMaterial3D::FLAG_USE_TEXTURE_REPEAT, false);
-						tile->set_material(mat);
+						tile->set_material(make_chunk_material(result.ei, result.ni, tex));
 						ortho_applied = true;
 					}
 				}
 				if (!ortho_applied) {
-					tile->set_material(shared_material);
+					tile->set_material(make_chunk_material(result.ei, result.ni, Ref<Texture2D>()));
 				}
 
 				int base_ei = result.ei * chunk_size;
@@ -1550,6 +1547,8 @@ void S3DTileManager::_bind_methods()
 	ClassDB::bind_method(D_METHOD("get_landcover_paths"), &S3DTileManager::get_landcover_paths);
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_STRING_ARRAY, "landcover_paths"), "set_landcover_paths", "get_landcover_paths");
 	ClassDB::bind_method(D_METHOD("landcover_image", "path", "px"), &S3DTileManager::landcover_image);
+	ClassDB::bind_method(D_METHOD("chunk_cover_covers", "ei", "ni"), &S3DTileManager::chunk_cover_covers);
+	ClassDB::bind_method(D_METHOD("get_masked_chunk_count"), &S3DTileManager::get_masked_chunk_count);
 
 	ClassDB::bind_method(D_METHOD("set_skip_white_pixels", "skip"), &S3DTileManager::set_skip_white_pixels);
 	ClassDB::bind_method(D_METHOD("get_skip_white_pixels"), &S3DTileManager::get_skip_white_pixels);
@@ -2066,6 +2065,8 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 			}
 		}
 	}
+	update_chunk_cover(cam_ei, cam_ni, max_radius);
+
 	for (uint64_t key : chunks_to_remove) {
 		auto it = chunks.find(key);
 		if (it != chunks.end()) {
@@ -2415,6 +2416,108 @@ void S3DTileManager::set_landcover_paths(const PackedStringArray &p_paths)
 PackedStringArray S3DTileManager::get_landcover_paths() const
 {
 	return landcover_paths;
+}
+
+Ref<Material> S3DTileManager::make_chunk_material(int cg_ei, int cg_ni, Ref<Texture2D> p_tex)
+{
+	if (chunk_shader.is_null()) {
+		ResourceLoader *rl = ResourceLoader::get_singleton();
+		const String path = "res://addons/scenery3d/shaders/chunk.gdshader";
+		if (rl && rl->exists(path)) chunk_shader = rl->load(path);
+	}
+	if (chunk_shader.is_null()) {
+		// No shader (headless without the addon files): the old materials.
+		if (p_tex.is_null()) return shared_material;
+		Ref<StandardMaterial3D> mat;
+		mat.instantiate();
+		mat->set_texture(StandardMaterial3D::TEXTURE_ALBEDO, p_tex);
+		mat->set_cull_mode(StandardMaterial3D::CULL_DISABLED);
+		mat->set_flag(BaseMaterial3D::FLAG_USE_TEXTURE_REPEAT, false);
+		return mat;
+	}
+	Ref<ShaderMaterial> mat;
+	mat.instantiate();
+	mat->set_shader(chunk_shader);
+	mat->set_shader_parameter("chunk_base", Vector2((real_t)(cg_ei * chunk_size), (real_t)(cg_ni * chunk_size)));
+	mat->set_shader_parameter("chunk_tiles", (float)chunk_size);
+	if (p_tex.is_valid()) {
+		mat->set_shader_parameter("albedo_tex", p_tex);
+		mat->set_shader_parameter("has_albedo_tex", true);
+	}
+	return mat;
+}
+
+// The cover mask (squares whose individual tile is drawn) for the chunks
+// that straddle the close ring; chunks that left the ring zone get their
+// mask cleared once. Cheap: the mask is a ~40 px R8 image and only the
+// straddling chunks (a handful) are touched.
+void S3DTileManager::update_chunk_cover(int cam_ei, int cam_ni, int max_radius)
+{
+	if (chunk_size < 1 || chunks.empty()) {
+		return;
+	}
+	const int r = max_radius + unload_margin + 1;
+	const bool rebuild = coverage_generation != cover_gen_built || cam_ei != cover_cam_ei || cam_ni != cover_cam_ni;
+	if (rebuild) {
+		const int n = 2 * r + 1;
+		PackedByteArray px;
+		px.resize((int64_t)n * n);
+		px.fill(0);
+		uint8_t *w = px.ptrw();
+		cover_e_min = cam_ei - r;
+		cover_n_min = cam_ni - r;
+		cover_n = n;
+		for (const auto &[key, state] : tiles) {
+			if (!state.node || state.node->get_mesh().is_null()) continue;
+			const int ie = (int)(int32_t)(key >> 32) - cover_e_min;
+			const int in = (int)(int32_t)(key & 0xFFFFFFFF) - cover_n_min;
+			if (ie >= 0 && ie < n && in >= 0 && in < n) w[(int64_t)in * n + ie] = 255;
+		}
+		Ref<Image> img = Image::create_from_data(n, n, false, Image::FORMAT_R8, px);
+		if (cover_tex.is_valid() && cover_tex->get_width() == n && cover_tex->get_height() == n) {
+			cover_tex->update(img);
+		} else {
+			cover_tex = ImageTexture::create_from_image(img);
+		}
+		cover_px = px;
+		cover_gen_built = coverage_generation;
+		cover_cam_ei = cam_ei;
+		cover_cam_ni = cam_ni;
+	}
+	const Vector4 rect((real_t)cover_e_min, (real_t)cover_n_min, (real_t)cover_n, 0.0f);
+	std::unordered_set<uint64_t> now;
+	for (const auto &[key, state] : chunks) {
+		if (!state.node) continue;
+		const int cg_ei = (int)(int32_t)(key >> 32);
+		const int cg_ni = (int)(int32_t)(key & 0xFFFFFFFF);
+		const int base_ei = cg_ei * chunk_size, base_ni = cg_ni * chunk_size;
+		const int closest_ei = std::max(base_ei, std::min(cam_ei, base_ei + chunk_size - 1));
+		const int closest_ni = std::max(base_ni, std::min(cam_ni, base_ni + chunk_size - 1));
+		const int min_dist = std::max(std::abs(closest_ei - cam_ei), std::abs(closest_ni - cam_ni));
+		if (min_dist > r) continue;
+		now.insert(key);
+		if (!rebuild && masked_chunks.count(key)) continue;
+		Ref<ShaderMaterial> mat = state.node->get_material();
+		if (mat.is_null()) continue;
+		mat->set_shader_parameter("cover_mask", cover_tex);
+		mat->set_shader_parameter("cover_rect", rect);
+	}
+	for (uint64_t key : masked_chunks) {
+		if (now.count(key)) continue;
+		auto it = chunks.find(key);
+		if (it == chunks.end() || !it->second.node) continue;
+		Ref<ShaderMaterial> mat = it->second.node->get_material();
+		if (mat.is_valid()) mat->set_shader_parameter("cover_rect", Vector4());
+	}
+	masked_chunks = std::move(now);
+}
+
+bool S3DTileManager::chunk_cover_covers(int p_ei, int p_ni) const
+{
+	if (cover_n <= 0 || cover_px.size() < (int64_t)cover_n * cover_n) return false;
+	const int ie = p_ei - cover_e_min, in = p_ni - cover_n_min;
+	if (ie < 0 || ie >= cover_n || in < 0 || in >= cover_n) return false;
+	return cover_px[(int64_t)in * cover_n + ie] != 0;
 }
 
 Ref<Image> S3DTileManager::landcover_image(const String &p_path, int p_px) const

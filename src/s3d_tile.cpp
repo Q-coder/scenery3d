@@ -377,12 +377,12 @@ void S3DTile::set_heightmap(Ref<Image> p_heightmap)
 	mesh_ready = false;
 }
 
-void S3DTile::set_material(Ref<StandardMaterial3D> p_mat)
+void S3DTile::set_material(Ref<Material> p_mat)
 {
 	material = p_mat;
 }
 
-Ref<StandardMaterial3D> S3DTile::get_material() const
+Ref<Material> S3DTile::get_material() const
 {
 	return material;
 }

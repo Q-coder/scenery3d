@@ -6,6 +6,9 @@
 #include <godot_cpp/classes/standard_material3d.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/image.hpp>
+#include <godot_cpp/classes/shader.hpp>
+#include <godot_cpp/classes/shader_material.hpp>
+#include <godot_cpp/classes/texture2d.hpp>
 #include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/packed_string_array.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
@@ -20,6 +23,8 @@
 #include <condition_variable>
 #include <atomic>
 #include <string>
+#include <climits>
+#include <cstdint>
 
 #include "s3d_elevation_db.h"
 #include "s3d_frame.h"
@@ -140,6 +145,10 @@ namespace s3d
 			struct RawRgb { int w = 0; std::vector<uint8_t> rgb; };
 			std::unordered_map<int, RawRgb> chunk_ortho_rgb;
 			int chunk_tile_count = 0;
+			// Some sub-tile was painted from land cover: the chunk is kept
+			// however few pixels are "real" (a coastal chunk with a few
+			// squares of land is land, not an orthophoto gap).
+			bool landcover_painted = false;
 		};
 
 		// Active tile states keyed by tile_key(ei, ni).
@@ -178,6 +187,22 @@ namespace s3d
 		// square's forest polygons into a small ground texture, so woods
 		// stay recognisable past the tree cards, out to the far chunks.
 		godot::PackedStringArray landcover_paths;
+
+		// Far chunks are ShaderMaterials (shaders/chunk.gdshader): a chunk
+		// straddling the close ring gets a mask of the squares whose
+		// individual tile is drawn and discards its fragments there, so it
+		// can never surface through a tile (the 30 m sink alone fails where
+		// a LOD-reduced tile bridges a ravine). The mask is rebuilt when the
+		// resident geometry or the camera square changes.
+		godot::Ref<godot::Shader> chunk_shader;
+		godot::Ref<godot::ImageTexture> cover_tex;
+		godot::PackedByteArray cover_px;   // the mask bytes (row = ni, col = ei), kept for chunk_cover_covers
+		int cover_e_min = 0, cover_n_min = 0, cover_n = 0;
+		uint64_t cover_gen_built = ~0ull;
+		int cover_cam_ei = INT32_MIN, cover_cam_ni = INT32_MIN;
+		std::unordered_set<uint64_t> masked_chunks;
+		godot::Ref<godot::Material> make_chunk_material(int cg_ei, int cg_ni, godot::Ref<godot::Texture2D> p_tex);
+		void update_chunk_cover(int cam_ei, int cam_ni, int max_radius);
 
 		// When true and 2+ orthophoto paths are configured, the worker
 		// decodes every candidate JPEG and composites them: pure white
@@ -391,6 +416,10 @@ namespace s3d
 		// The land-cover raster of one forest file at px pixels (tests);
 		// an empty Ref when the file does not parse.
 		godot::Ref<godot::Image> landcover_image(const godot::String &p_path, int p_px) const;
+		// Whether the chunk cover mask marks square (ei, ni) as drawn by an
+		// individual tile (tests).
+		bool chunk_cover_covers(int p_ei, int p_ni) const;
+		int get_masked_chunk_count() const { return (int)masked_chunks.size(); }
 
 		void set_skip_white_pixels(bool p_skip);
 		bool get_skip_white_pixels() const;

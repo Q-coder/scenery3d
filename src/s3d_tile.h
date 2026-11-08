@@ -6,6 +6,7 @@
 #include <godot_cpp/classes/mesh_instance3d.hpp>
 #include "s3d_frame.h"
 #include <godot_cpp/classes/standard_material3d.hpp>
+#include <godot_cpp/classes/material.hpp>
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/packed_vector2_array.hpp>
@@ -30,7 +31,7 @@ namespace s3d
 		bool mesh_ready = false;
 
 		godot::Ref<godot::Image> heightmap;
-		godot::Ref<godot::StandardMaterial3D> material;
+		godot::Ref<godot::Material> material;
 
 		// Placement (see S3DFrame): the mesh is authored as flat offsets from
 		// grid anchor (anchor_e, anchor_n) [local x = anchor_e - E, z = N -
@@ -77,8 +78,8 @@ namespace s3d
 		godot::Ref<godot::Image> get_heightmap() const;
 
 		// Set shared material (used by generate_mesh if set).
-		void set_material(godot::Ref<godot::StandardMaterial3D> p_mat);
-		godot::Ref<godot::StandardMaterial3D> get_material() const;
+		void set_material(godot::Ref<godot::Material> p_mat);
+		godot::Ref<godot::Material> get_material() const;
 
 		// Returns true once the mesh has been generated.
 		bool is_mesh_ready() const;
