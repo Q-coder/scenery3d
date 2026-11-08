@@ -16,11 +16,14 @@ uniform int species_count = 4;
 uniform float fade_begin_m = 6400.0;
 uniform float fade_end_m = 8000.0;
 uniform float wind = 0.0;   // sway amplitude, set by the manager from the wind speed (0 in calm air)
+uniform float lod_split_m = 2500.0;   // near / far hand-over distance ...
+uniform float lod_band_m = 400.0;     // ... crossfaded per tree over +- this band by dither
 uniform float alpha_cut : hint_range(0.1, 0.9) = 0.45;
 
 varying float v_top;
 varying float v_view_up;
 varying float v_dist;
+varying float v_far;    // 1 = an instance of the thinned far set
 varying vec3 v_tint;
 
 void vertex() {
@@ -41,6 +44,7 @@ void vertex() {
 	}
 	v_dist = length((MODELVIEW_MATRIX * vec4(VERTEX, 1.0)).xyz);
 	v_tint = mix(vec3(1.0), vec3(1.06, 0.98, 0.82), INSTANCE_CUSTOM.y) * (0.82 + 0.3 * INSTANCE_CUSTOM.z);
+	v_far = INSTANCE_CUSTOM.w;
 	NORMAL = vec3(0.0, 1.0, 0.0);
 }
 
@@ -52,8 +56,19 @@ void fragment() {
 	} else {
 		a *= 1.0 - smoothstep(0.82, 0.97, v_view_up);
 	}
-	float keep = 1.0 - smoothstep(fade_begin_m, fade_end_m, v_dist);
 	float dither = fract(52.9829189 * fract(dot(FRAGCOORD.xy, vec2(0.06711056, 0.00583715))));
+	// near -> far hand-over: the near set dissolves and the far set condenses
+	// over the band, complementary per pixel so the cover never doubles
+	float t = smoothstep(lod_split_m - lod_band_m, lod_split_m + lod_band_m, v_dist);
+	if (v_far > 0.5) {
+		if ((1.0 - dither) >= t) {
+			a = 0.0;
+		}
+	} else if (dither >= 1.0 - t) {
+		a = 0.0;
+	}
+	// the far edge: everything dissolves before the far set is culled
+	float keep = 1.0 - smoothstep(fade_begin_m, fade_end_m, v_dist);
 	if (keep < dither) {
 		a = 0.0;
 	}

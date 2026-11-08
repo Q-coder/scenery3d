@@ -73,6 +73,7 @@ namespace s3d
 			int snapped = 0;                 // trees placed on the terrain's height instead of the record's
 			float ground_min = 0.0f, ground_max = 0.0f;
 			bool snap_pending = false;       // terrain not loaded yet when built: rebuild when it arrives
+			bool reloading = false;          // a rebuild is in flight; the old nodes stay until it lands
 		};
 
 		// vegetation_{E}_{N}.bin index per configured directory.
@@ -160,7 +161,11 @@ namespace s3d
 		bool card_assets_ready = false;
 		void prepare_card_assets();
 		int pick_species(uint32_t hash, float ground_z) const;
-		godot::MultiMeshInstance3D *make_instances(const LoadResult &result, const std::vector<size_t> &indices, double scale_mul, const char *suffix, TileState *stats);
+		godot::MultiMeshInstance3D *make_instances(const LoadResult &result, const std::vector<size_t> &indices, double scale_mul, const char *suffix, TileState *stats, bool far_set);
+		// Near / far hand-over band: both sets are drawn within lod_band_m of
+		// near_range_m and the shader crossfades them per tree by dither, so no
+		// tile swaps as a whole (gery 2026-11-08: "visible flickering of chunks").
+		double lod_band_m = 400.0;
 
 		// Last camera position.
 		double last_cam_e = 0;

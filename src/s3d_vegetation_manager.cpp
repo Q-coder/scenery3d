@@ -351,6 +351,8 @@ void S3DVegetationManager::prepare_card_assets()
 		card_material->set_shader_parameter("species_count", (int)species.size());
 		card_material->set_shader_parameter("fade_begin_m", far_range_m * 0.8);
 		card_material->set_shader_parameter("fade_end_m", far_range_m);
+		card_material->set_shader_parameter("lod_split_m", near_range_m);
+		card_material->set_shader_parameter("lod_band_m", lod_band_m);
 		card_material->set_shader_parameter("wind", std::clamp(wind_speed_mps / 12.0, 0.0, 1.0) * 0.03);
 	} else {
 		UtilityFunctions::push_warning("S3DVegetationManager: shaders/tree.gdshader not found; cards draw untextured");
@@ -374,7 +376,7 @@ int S3DVegetationManager::pick_species(uint32_t hash, float ground_z) const
 // One MultiMeshInstance3D for a subset of a tile's records. Card mode: the
 // card mesh, scaled to the tree's height and crown, with the species /
 // variation in the custom data; mesh mode: the user mesh as before.
-MultiMeshInstance3D *S3DVegetationManager::make_instances(const LoadResult &result, const std::vector<size_t> &indices, double scale_mul, const char *suffix, TileState *stats)
+MultiMeshInstance3D *S3DVegetationManager::make_instances(const LoadResult &result, const std::vector<size_t> &indices, double scale_mul, const char *suffix, TileState *stats, bool far_set)
 {
 	if (stats) {
 		stats->species_counts.assign(std::max<size_t>(1, species.size()), 0);
@@ -436,7 +438,7 @@ MultiMeshInstance3D *S3DVegetationManager::make_instances(const LoadResult &resu
 			scale_xz = scale_y;
 			b = b.rotated(Vector3(0, 1, 0), t.yaw_rad);
 			b = b.scaled(Vector3(scale_xz, scale_y, scale_xz));
-			mm->set_instance_custom_data((int)k, Color((float)sp, (float)((h >> 8) & 0xFF) / 255.0f, (float)((h >> 20) & 0xFF) / 255.0f, 0.0f));
+			mm->set_instance_custom_data((int)k, Color((float)sp, (float)((h >> 8) & 0xFF) / 255.0f, (float)((h >> 20) & 0xFF) / 255.0f, far_set ? 1.0f : 0.0f));
 			if (stats) {
 				stats->species_counts[sp]++;
 				stats->min_height = std::min(stats->min_height, scale_y);
@@ -541,21 +543,31 @@ void S3DVegetationManager::process_load_results()
 			}
 		}
 		if (!card_mode) {
-			st.node = make_instances(result, keep_indices, 1.0, "", nullptr);
+			if (st.node) st.node->queue_free();
+			st.node = make_instances(result, keep_indices, 1.0, "", nullptr, false);
+			st.reloading = false;
 			continue;
 		}
 		// Card mode: the near set (every kept tree) to near_range_m, the far
-		// set (every n-th tree, enlarged so the canopy cover stays) beyond.
-		st.node = make_instances(result, keep_indices, 1.0, "_near", &st);
-		st.node->set_visibility_range_end((float)near_range_m);
+		// set (every n-th tree, enlarged so the canopy cover stays) beyond. A
+		// rebuilt tile (terrain arrived) replaces its nodes in the same frame.
+		// The engine's ranges only cull well outside the hand-over band
+		// (tile half-diagonal 724 m); the shader crossfades per tree inside it.
+		if (st.node) st.node->queue_free();
+		if (st.far_node) st.far_node->queue_free();
+		st.far_node = nullptr;
+		st.reloading = false;
+		const float slack = (float)lod_band_m + 800.0f;
+		st.node = make_instances(result, keep_indices, 1.0, "_near", &st, false);
+		st.node->set_visibility_range_end((float)near_range_m + slack);
 		st.node->set_visibility_range_fade_mode(GeometryInstance3D::VISIBILITY_RANGE_FADE_DISABLED);
 		const int step = std::max(1, (int)std::lround(1.0 / std::clamp(far_fraction, 0.02, 1.0)));
 		std::vector<size_t> far_indices;
 		far_indices.reserve(keep_indices.size() / step + 1);
 		for (size_t k = 0; k < keep_indices.size(); k += step) far_indices.push_back(keep_indices[k]);
-		st.far_node = make_instances(result, far_indices, far_scale, "_far", nullptr);
+		st.far_node = make_instances(result, far_indices, far_scale, "_far", nullptr, true);
 		st.far_height_ratio = (float)far_scale;
-		st.far_node->set_visibility_range_begin((float)near_range_m);
+		st.far_node->set_visibility_range_begin(std::max(0.0f, (float)near_range_m - slack));
 		st.far_node->set_visibility_range_end((float)far_range_m + 1500.0f);
 		st.far_node->set_visibility_range_fade_mode(GeometryInstance3D::VISIBILITY_RANGE_FADE_DISABLED);
 	}
@@ -598,9 +610,23 @@ void S3DVegetationManager::resnap_pending_tiles()
 		const int te = std::stoi(id.substr(colon + 1, under - colon - 1));
 		const int tn = std::stoi(id.substr(under + 1));
 		if (!elevation_db->has_tile((int)std::floor((te + 512.0) / ts), (int)std::floor((tn + 512.0) / ts))) { ++it; continue; }
-		if (st.node) st.node->queue_free();
-		if (st.far_node) st.far_node->queue_free();
-		it = tiles.erase(it);
+		// rebuild in place: the old nodes stay on screen until the new ones land
+		std::string path;
+		const int gi = std::atoi(id.substr(0, colon).c_str());
+		if (gi >= 0 && gi < (int)manifests.size()) {
+			for (const auto &e : manifests[gi]) {
+				if (e.tile_e == te && e.tile_n == tn) { path = e.path; break; }
+			}
+		}
+		if (path.empty()) { ++it; continue; }
+		st.snap_pending = false;
+		st.reloading = true;
+		{
+			std::lock_guard<std::mutex> lock(work_mutex);
+			work_queue.push_back(LoadRequest{id, path});
+		}
+		work_cv.notify_one();
+		++it;
 	}
 }
 
@@ -781,7 +807,12 @@ double S3DVegetationManager::get_density_fraction() const { return density_fract
 void S3DVegetationManager::set_card_mode(bool on) { if (on != card_mode) { card_mode = on; card_assets_ready = false; clear_loaded_tiles(); } }
 void S3DVegetationManager::set_atlas_path(const String &p) { atlas_path = p; card_assets_ready = false; clear_loaded_tiles(); }
 void S3DVegetationManager::set_atlas_meta_path(const String &p) { atlas_meta_path = p; card_assets_ready = false; clear_loaded_tiles(); }
-void S3DVegetationManager::set_near_range_m(double v) { near_range_m = std::max(200.0, v); clear_loaded_tiles(); }
+void S3DVegetationManager::set_near_range_m(double v)
+{
+	near_range_m = std::max(200.0, v);
+	if (card_material.is_valid()) card_material->set_shader_parameter("lod_split_m", near_range_m);
+	clear_loaded_tiles();
+}
 void S3DVegetationManager::set_far_range_m(double v)
 {
 	far_range_m = std::max(near_range_m, v);
