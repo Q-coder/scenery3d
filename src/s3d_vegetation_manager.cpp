@@ -236,12 +236,17 @@ void S3DVegetationManager::load_manifests()
 			else surveyed.insert(key_of(e.tile_e, e.tile_n));
 		}
 	}
+	// The same square's forest file in several packs (a pack and its build
+	// dir both in the library) fills once: the first group, the rest only
+	// contribute corridors.
+	std::unordered_set<uint64_t> filled;
 	for (auto &group : manifests) {
 		for (auto &e : group) {
 			const uint64_t k = key_of(e.tile_e, e.tile_n);
 			auto it = forest_paths.find(k);
 			if (it != forest_paths.end()) e.corridor_paths = it->second;
-			if (e.forest && surveyed.count(k)) e.trees_disabled = true;
+			if (e.forest && (surveyed.count(k) || filled.count(k))) e.trees_disabled = true;
+			if (e.forest && !e.trees_disabled) filled.insert(k);
 		}
 	}
 	manifest_loaded = true;
