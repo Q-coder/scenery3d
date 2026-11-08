@@ -41,11 +41,32 @@ namespace s3d
 			float height_m;
 			float yaw_rad;
 			float crown_radius_m;
+			int8_t species_hint = -1;   // forest_*.bin leaf type: 0 broadleaf, 1 conifer, -1 by altitude
 		};
+		// forest_{E}_{N}.bin (FOR1, scripts/build_world_forests.py): OSM forest
+		// polygons the worker fills with trees at load time, and road / rail
+		// corridors (centre line + half width) no tree may stand in. The
+		// corridors of every forest file of a square also thin the surveyed
+		// vegetation_*.bin trees of that square (roads clear inside forests).
+		struct Corridor {
+			std::vector<float> xz;   // dx, dz pairs along the centre line
+			float half_width = 3.0f;
+			float min_x = 0, min_z = 0, max_x = 0, max_z = 0;
+		};
+		struct ForestPolygon {
+			int kind = 2;            // 0 broadleaf, 1 conifer, 2 mixed
+			float density = 1.0f / 36.0f;   // trees per m2
+			float height_m = 20.0f;
+			std::vector<std::vector<float>> rings;   // outer first, then holes; dx, dz pairs
+		};
+		static bool parse_forest_file(const std::string &path, std::vector<ForestPolygon> &polys, std::vector<Corridor> &corridors, double &tile_east, double &tile_north);
+		static void fill_polygons(const std::vector<ForestPolygon> &polys, uint32_t seed, std::vector<TreeInstance> &out);
+		static void apply_corridors(const std::vector<Corridor> &corridors, std::vector<TreeInstance> &trees);
 
 		struct LoadResult {
 			std::string tile_id;
 			bool success = false;
+			bool forest_fill_skipped = false;
 			double tile_east = 0;
 			double tile_north = 0;
 			std::vector<TreeInstance> trees;
@@ -54,6 +75,9 @@ namespace s3d
 		struct LoadRequest {
 			std::string tile_id;
 			std::string path;
+			bool forest = false;                      // a forest_*.bin: fill polygons
+			bool trees_disabled = false;              // a surveyed tile covers the square: corridors only
+			std::vector<std::string> corridor_paths;  // every forest file of the square (all groups)
 		};
 
 		struct TileState {
@@ -74,6 +98,8 @@ namespace s3d
 			float ground_min = 0.0f, ground_max = 0.0f;
 			bool snap_pending = false;       // terrain not loaded yet when built: rebuild when it arrives
 			bool reloading = false;          // a rebuild is in flight; the old nodes stay until it lands
+			bool forest_fill_skipped = false;   // a forest file whose square has a surveyed tile
+			std::vector<float> positions;    // dx, dz of the near set when debug_keep_positions (tests)
 		};
 
 		// vegetation_{E}_{N}.bin index per configured directory.
@@ -81,6 +107,9 @@ namespace s3d
 			std::string path;
 			int tile_e = 0;
 			int tile_n = 0;
+			bool forest = false;                      // forest_*.bin (polygons) rather than vegetation_*.bin (trees)
+			bool trees_disabled = false;              // a vegetation_*.bin of the same square exists: corridors only
+			std::vector<std::string> corridor_paths;
 		};
 
 		std::vector<std::vector<ManifestEntry>> manifests;  // by group
@@ -140,6 +169,7 @@ namespace s3d
 		double far_fraction = 0.25;
 		double far_scale = 1.6;
 		int results_per_frame = 3;
+		bool debug_keep_positions = false;
 		// The host's terrain heights (Scenery3D.get_elevation_db()): in card
 		// mode every tree stands on the terrain that is actually drawn, not
 		// on the record's ground height from another DEM (SwissTopo 1 m
@@ -160,7 +190,8 @@ namespace s3d
 		godot::Ref<godot::ShaderMaterial> card_material;
 		bool card_assets_ready = false;
 		void prepare_card_assets();
-		int pick_species(uint32_t hash, float ground_z) const;
+		int pick_species(uint32_t hash, float ground_z, int hint = -1) const;
+		const TileState *find_tile_state(int tile_e, int tile_n) const;
 		godot::MultiMeshInstance3D *make_instances(const LoadResult &result, const std::vector<size_t> &indices, double scale_mul, const char *suffix, TileState *stats, bool far_set);
 		// Near / far hand-over band: both sets are drawn within lod_band_m of
 		// near_range_m and the shader crossfades them per tree by dither, so no
@@ -247,6 +278,10 @@ namespace s3d
 		godot::Dictionary tile_stats(int tile_e, int tile_n) const;
 		// Loaded tiles still waiting for terrain heights (or rebuilding).
 		int pending_tile_count() const;
+		void set_debug_keep_positions(bool on) { debug_keep_positions = on; }
+		bool get_debug_keep_positions() const { return debug_keep_positions; }
+		// dx, dz pairs of the near set of the tile (debug_keep_positions on).
+		godot::PackedVector2Array tile_tree_positions(int tile_e, int tile_n) const;
 
 		void set_exclusion_zones(const godot::Array &zones);
 		godot::Array get_exclusion_zones() const;

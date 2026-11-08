@@ -30,6 +30,8 @@ static constexpr uint32_t VEG_MAGIC = 0x31474556; // 'V','E','G','1' little-endi
 static constexpr uint32_t VEG_VERSION = 1;
 static constexpr size_t HEADER_SIZE = 32;
 static constexpr size_t RECORD_SIZE = 24;
+static constexpr uint32_t FOR_MAGIC = 0x31524F46; // 'F','O','R','1'
+static constexpr uint32_t FOR_VERSION = 1;
 
 // ── Constructor / Destructor ────────────────────────────────────────────────
 
@@ -96,6 +98,29 @@ void S3DVegetationManager::worker_func()
 
 		LoadResult result;
 		result.tile_id = req.tile_id;
+		if (req.forest) {
+			// polygons filled with trees here on the worker; corridors below
+			std::vector<ForestPolygon> polys;
+			std::vector<Corridor> corridors;
+			if (parse_forest_file(req.path, polys, corridors, result.tile_east, result.tile_north)) {
+				if (!req.trees_disabled) {
+					fill_polygons(polys, (uint32_t)std::hash<std::string>{}(req.tile_id), result.trees);
+				} else {
+					result.forest_fill_skipped = true;
+				}
+				for (const std::string &cp : req.corridor_paths) {
+					if (cp == req.path) continue;
+					std::vector<ForestPolygon> dummy;
+					double e2, n2;
+					parse_forest_file(cp, dummy, corridors, e2, n2);
+				}
+				apply_corridors(corridors, result.trees);
+				result.success = true;
+			}
+			std::lock_guard<std::mutex> lock(results_mutex);
+			results_queue.push_back(std::move(result));
+			continue;
+		}
 
 		std::ifstream f(req.path, std::ios::binary | std::ios::ate);
 		if (!f.is_open()) {
@@ -144,6 +169,16 @@ void S3DVegetationManager::worker_func()
 			result.trees.push_back(t);
 			p += RECORD_SIZE;
 		}
+		if (!req.corridor_paths.empty()) {
+			// roads clear inside the surveyed forests too
+			std::vector<Corridor> corridors;
+			for (const std::string &cp : req.corridor_paths) {
+				std::vector<ForestPolygon> dummy;
+				double e2, n2;
+				parse_forest_file(cp, dummy, corridors, e2, n2);
+			}
+			apply_corridors(corridors, result.trees);
+		}
 		result.success = true;
 
 		{
@@ -174,8 +209,9 @@ void S3DVegetationManager::load_manifests()
 			name = da->get_next();
 			if (name.is_empty()) break;
 			if (da->current_is_dir()) continue;
-			if (!name.begins_with("vegetation_") || !name.ends_with(".bin")) continue;
-			// vegetation_{E}_{N}.bin
+			const bool is_forest = name.begins_with("forest_");
+			if ((!name.begins_with("vegetation_") && !is_forest) || !name.ends_with(".bin")) continue;
+			// vegetation_{E}_{N}.bin / forest_{E}_{N}.bin
 			String stem = name.substr(0, name.length() - 4);
 			PackedStringArray parts = stem.split("_");
 			if (parts.size() < 3) continue;
@@ -183,10 +219,30 @@ void S3DVegetationManager::load_manifests()
 			e.path = String(dir + "/" + name).utf8().get_data();
 			e.tile_e = parts[parts.size() - 2].to_int();
 			e.tile_n = parts[parts.size() - 1].to_int();
+			e.forest = is_forest;
 			group.push_back(e);
 		}
 		da->list_dir_end();
 		manifests.push_back(group);
+	}
+	// Per square: every forest file's corridors apply to every entry of the
+	// square, and a polygon fill stands down where a surveyed tree tile exists.
+	std::unordered_map<uint64_t, std::vector<std::string>> forest_paths;
+	std::unordered_set<uint64_t> surveyed;
+	auto key_of = [](int e, int n) { return ((uint64_t)(uint32_t)e << 32) | (uint32_t)n; };
+	for (const auto &group : manifests) {
+		for (const auto &e : group) {
+			if (e.forest) forest_paths[key_of(e.tile_e, e.tile_n)].push_back(e.path);
+			else surveyed.insert(key_of(e.tile_e, e.tile_n));
+		}
+	}
+	for (auto &group : manifests) {
+		for (auto &e : group) {
+			const uint64_t k = key_of(e.tile_e, e.tile_n);
+			auto it = forest_paths.find(k);
+			if (it != forest_paths.end()) e.corridor_paths = it->second;
+			if (e.forest && surveyed.count(k)) e.trees_disabled = true;
+		}
 	}
 	manifest_loaded = true;
 }
@@ -229,6 +285,9 @@ void S3DVegetationManager::update_tiles(Vector3 camera_pos)
 				LoadRequest req;
 				req.tile_id = id;
 				req.path = e.path;
+				req.forest = e.forest;
+				req.trees_disabled = e.trees_disabled;
+				req.corridor_paths = e.corridor_paths;
 				{
 					std::lock_guard<std::mutex> lock(work_mutex);
 					work_queue.push_back(req);
@@ -265,6 +324,163 @@ void S3DVegetationManager::update_tiles(Vector3 camera_pos)
 			++it;
 		}
 	}
+}
+
+// ── Forest polygon tiles (FOR1) ─────────────────────────────────────────────
+// header 32 B: "FOR1", u32 version, u32 polygon count, u32 flags, f64 tile
+// east, f64 tile north. Polygon: u8 kind (0 broadleaf, 1 conifer, 2 mixed,
+// 3 corridor), u8[3] pad, f32 density (corridor: half width m), f32 height
+// m, u32 ring count; ring: u32 n, n x (f32 dx, f32 dz). A corridor has one
+// "ring": its centre line.
+bool S3DVegetationManager::parse_forest_file(const std::string &path, std::vector<ForestPolygon> &polys, std::vector<Corridor> &corridors, double &tile_east, double &tile_north)
+{
+	std::ifstream f(path, std::ios::binary | std::ios::ate);
+	if (!f.is_open()) return false;
+	const std::streamsize size = f.tellg();
+	f.seekg(0, std::ios::beg);
+	std::vector<uint8_t> buf((size_t)size);
+	f.read(reinterpret_cast<char *>(buf.data()), size);
+	if (buf.size() < 32 || s3d_read_u32(&buf[0]) != FOR_MAGIC || s3d_read_u32(&buf[4]) != FOR_VERSION) return false;
+	const uint32_t count = s3d_read_u32(&buf[8]);
+	tile_east = s3d_read_f64(&buf[16]);
+	tile_north = s3d_read_f64(&buf[24]);
+	size_t p = 32;
+	auto need = [&](size_t n) { return p + n <= buf.size(); };
+	for (uint32_t i = 0; i < count; i++) {
+		if (!need(16)) return false;
+		const int kind = buf[p];
+		const float density = s3d_read_f32(&buf[p + 4]);
+		const float height = s3d_read_f32(&buf[p + 8]);
+		const uint32_t rings = s3d_read_u32(&buf[p + 12]);
+		p += 16;
+		ForestPolygon poly;
+		poly.kind = kind;
+		poly.density = density;
+		poly.height_m = height > 1.0f ? height : 20.0f;
+		Corridor cor;
+		cor.half_width = density;
+		for (uint32_t r = 0; r < rings; r++) {
+			if (!need(4)) return false;
+			const uint32_t n = s3d_read_u32(&buf[p]);
+			p += 4;
+			if (!need((size_t)n * 8)) return false;
+			std::vector<float> ring;
+			ring.reserve((size_t)n * 2);
+			for (uint32_t k = 0; k < n; k++) {
+				ring.push_back(s3d_read_f32(&buf[p]));
+				ring.push_back(s3d_read_f32(&buf[p + 4]));
+				p += 8;
+			}
+			if (kind == 3) cor.xz = std::move(ring);
+			else poly.rings.push_back(std::move(ring));
+		}
+		if (kind == 3) {
+			if (cor.xz.size() >= 4) {
+				cor.min_x = cor.max_x = cor.xz[0];
+				cor.min_z = cor.max_z = cor.xz[1];
+				for (size_t k = 0; k + 1 < cor.xz.size(); k += 2) {
+					cor.min_x = std::min(cor.min_x, cor.xz[k]); cor.max_x = std::max(cor.max_x, cor.xz[k]);
+					cor.min_z = std::min(cor.min_z, cor.xz[k + 1]); cor.max_z = std::max(cor.max_z, cor.xz[k + 1]);
+				}
+				corridors.push_back(std::move(cor));
+			}
+		} else if (!poly.rings.empty() && poly.rings[0].size() >= 6) {
+			polys.push_back(std::move(poly));
+		}
+	}
+	return true;
+}
+
+static bool s3d_point_in_ring(const std::vector<float> &ring, float x, float z)
+{
+	bool inside = false;
+	const size_t n = ring.size() / 2;
+	for (size_t i = 0, j = n - 1; i < n; j = i++) {
+		const float xi = ring[2 * i], zi = ring[2 * i + 1], xj = ring[2 * j], zj = ring[2 * j + 1];
+		if (((zi > z) != (zj > z)) && (x < (xj - xi) * (z - zi) / (zj - zi + 1e-12f) + xi)) inside = !inside;
+	}
+	return inside;
+}
+
+static inline uint32_t s3d_hash2(uint32_t a, uint32_t b)
+{
+	uint32_t h = a * 2654435761u ^ (b + 0x9e3779b9u + (a << 6) + (a >> 2));
+	h ^= h >> 13; h *= 2246822519u; h ^= h >> 16;
+	return h;
+}
+
+// A jittered grid at the polygon's spacing (1 / sqrt(density)), points inside
+// the outer ring and outside the holes. Deterministic per tile and polygon so
+// a reload gives the same forest.
+void S3DVegetationManager::fill_polygons(const std::vector<ForestPolygon> &polys, uint32_t seed, std::vector<TreeInstance> &out)
+{
+	for (size_t pi = 0; pi < polys.size(); pi++) {
+		const ForestPolygon &poly = polys[pi];
+		if (poly.density <= 1e-6f) continue;
+		const float spacing = 1.0f / std::sqrt(poly.density);
+		const std::vector<float> &outer = poly.rings[0];
+		float minx = outer[0], maxx = outer[0], minz = outer[1], maxz = outer[1];
+		for (size_t k = 0; k + 1 < outer.size(); k += 2) {
+			minx = std::min(minx, outer[k]); maxx = std::max(maxx, outer[k]);
+			minz = std::min(minz, outer[k + 1]); maxz = std::max(maxz, outer[k + 1]);
+		}
+		minx = std::max(minx, 0.0f); minz = std::max(minz, 0.0f);
+		maxx = std::min(maxx, 1024.0f); maxz = std::min(maxz, 1024.0f);
+		const uint32_t pseed = s3d_hash2(seed, (uint32_t)pi);
+		int gi = 0;
+		for (float gx = minx; gx < maxx; gx += spacing, gi++) {
+			int gj = 0;
+			for (float gz = minz; gz < maxz; gz += spacing, gj++) {
+				const uint32_t h = s3d_hash2(pseed, (uint32_t)(gi * 7919 + gj));
+				const float jx = ((h & 0xFFFF) / 65535.0f - 0.5f) * 0.9f * spacing;
+				const float jz = (((h >> 16) & 0xFFFF) / 65535.0f - 0.5f) * 0.9f * spacing;
+				const float x = gx + jx, z = gz + jz;
+				if (x < 0.0f || z < 0.0f || x >= 1024.0f || z >= 1024.0f) continue;
+				if (!s3d_point_in_ring(outer, x, z)) continue;
+				bool in_hole = false;
+				for (size_t r = 1; r < poly.rings.size() && !in_hole; r++) in_hole = s3d_point_in_ring(poly.rings[r], x, z);
+				if (in_hole) continue;
+				const uint32_t h2 = s3d_hash2(h, 77u);
+				TreeInstance t;
+				t.dx = x;
+				t.dz = z;
+				t.ground_z = 0.0f;   // the build snaps it to the terrain
+				t.height_m = poly.height_m * (0.75f + 0.5f * ((h2 & 0xFFFF) / 65535.0f));
+				t.yaw_rad = ((h2 >> 16) & 0xFFFF) / 65535.0f * 6.2831853f;
+				t.crown_radius_m = 0.0f;
+				t.species_hint = poly.kind == 0 ? 0 : poly.kind == 1 ? 1 : -1;
+				out.push_back(t);
+			}
+		}
+	}
+}
+
+// Drop every tree closer to a corridor's centre line than its half width
+// plus a trunk's margin.
+void S3DVegetationManager::apply_corridors(const std::vector<Corridor> &corridors, std::vector<TreeInstance> &trees)
+{
+	if (corridors.empty() || trees.empty()) return;
+	std::vector<TreeInstance> kept;
+	kept.reserve(trees.size());
+	for (const TreeInstance &t : trees) {
+		bool blocked = false;
+		for (const Corridor &c : corridors) {
+			const float r = c.half_width + 1.0f;
+			if (t.dx < c.min_x - r || t.dx > c.max_x + r || t.dz < c.min_z - r || t.dz > c.max_z + r) continue;
+			for (size_t k = 0; k + 3 < c.xz.size() && !blocked; k += 2) {
+				const float ax = c.xz[k], az = c.xz[k + 1], bx = c.xz[k + 2], bz = c.xz[k + 3];
+				const float vx = bx - ax, vz = bz - az;
+				const float len2 = vx * vx + vz * vz;
+				float u = len2 > 1e-6f ? ((t.dx - ax) * vx + (t.dz - az) * vz) / len2 : 0.0f;
+				u = std::clamp(u, 0.0f, 1.0f);
+				const float px = ax + u * vx - t.dx, pz = az + u * vz - t.dz;
+				if (px * px + pz * pz < r * r) blocked = true;
+			}
+			if (blocked) break;
+		}
+		if (!blocked) kept.push_back(t);
+	}
+	trees.swap(kept);
 }
 
 // ── Card mode assets ────────────────────────────────────────────────────────
@@ -362,11 +578,11 @@ void S3DVegetationManager::prepare_card_assets()
 // Conifers take over with altitude (Swiss treeline mix: beech country below
 // 800 m, spruce / larch above 1 400 m); the hash spreads species evenly inside
 // each group.
-int S3DVegetationManager::pick_species(uint32_t hash, float ground_z) const
+int S3DVegetationManager::pick_species(uint32_t hash, float ground_z, int hint) const
 {
 	if (species.size() <= 1) return 0;
 	const double p_conifer = std::clamp(0.25 + (ground_z - 700.0) / 900.0, 0.2, 0.97);
-	const bool conifer = ((hash & 0xFFFF) / 65535.0) < p_conifer;
+	const bool conifer = hint == 1 ? true : hint == 0 ? false : ((hash & 0xFFFF) / 65535.0) < p_conifer;
 	std::vector<int> pool;
 	for (size_t i = 0; i < species.size(); i++) if (species[i].conifer == conifer) pool.push_back((int)i);
 	if (pool.empty()) for (size_t i = 0; i < species.size(); i++) pool.push_back((int)i);
@@ -386,6 +602,7 @@ MultiMeshInstance3D *S3DVegetationManager::make_instances(const LoadResult &resu
 		stats->alpine_total = 0;
 		stats->low_height_sum = stats->alpine_height_sum = 0.0f;
 		stats->snapped = 0;
+		stats->positions.clear();
 		stats->ground_min = 1e9f;
 		stats->ground_max = -1e9f;
 		stats->snap_pending = false;
@@ -434,7 +651,7 @@ MultiMeshInstance3D *S3DVegetationManager::make_instances(const LoadResult &resu
 		Basis b;
 		float scale_y, scale_xz;
 		if (card_mode) {
-			const int sp = pick_species(h, t.ground_z);
+			const int sp = pick_species(h, t.ground_z, t.species_hint);
 			// Trees shrink towards the tree line: full height to 1 300 m, about
 			// half at 2 200 m (the records carry one 22 m distribution at every
 			// altitude; Swiss spruce stands at 1 900 m are 10-15 m).
@@ -447,6 +664,7 @@ MultiMeshInstance3D *S3DVegetationManager::make_instances(const LoadResult &resu
 			b = b.scaled(Vector3(scale_xz, scale_y, scale_xz));
 			mm->set_instance_custom_data((int)k, Color((float)sp, (float)((h >> 8) & 0xFF) / 255.0f, (float)((h >> 20) & 0xFF) / 255.0f, far_set ? 1.0f : 0.0f));
 			if (stats) {
+				if (debug_keep_positions) { stats->positions.push_back(t.dx); stats->positions.push_back(t.dz); }
 				stats->species_counts[sp]++;
 				stats->min_height = std::min(stats->min_height, scale_y);
 				stats->max_height = std::max(stats->max_height, scale_y);
@@ -498,6 +716,7 @@ void S3DVegetationManager::process_load_results()
 		TileState &st = it->second;
 		st.loading = false;
 		st.loaded = true;
+		st.forest_fill_skipped = result.forest_fill_skipped;
 		if (card_mode) prepare_card_assets();
 		if (!result.success || result.trees.empty() || (card_mode ? card_mesh.is_null() : tree_mesh.is_null())) {
 			st.no_data = true;
@@ -618,19 +837,25 @@ void S3DVegetationManager::resnap_pending_tiles()
 		const int tn = std::stoi(id.substr(under + 1));
 		if (!elevation_db->has_any_tile((int)std::floor((te + 512.0) / ts), (int)std::floor((tn + 512.0) / ts))) { ++it; continue; }
 		// rebuild in place: the old nodes stay on screen until the new ones land
-		std::string path;
+		const ManifestEntry *entry = nullptr;
 		const int gi = std::atoi(id.substr(0, colon).c_str());
 		if (gi >= 0 && gi < (int)manifests.size()) {
 			for (const auto &e : manifests[gi]) {
-				if (e.tile_e == te && e.tile_n == tn) { path = e.path; break; }
+				if (e.tile_e == te && e.tile_n == tn) { entry = &e; break; }
 			}
 		}
-		if (path.empty()) { ++it; continue; }
+		if (entry == nullptr) { ++it; continue; }
 		st.snap_pending = false;
 		st.reloading = true;
 		{
+			LoadRequest req;
+			req.tile_id = id;
+			req.path = entry->path;
+			req.forest = entry->forest;
+			req.trees_disabled = entry->trees_disabled;
+			req.corridor_paths = entry->corridor_paths;
 			std::lock_guard<std::mutex> lock(work_mutex);
-			work_queue.push_back(LoadRequest{id, path});
+			work_queue.push_back(req);
 		}
 		work_cv.notify_one();
 		++it;
@@ -747,6 +972,10 @@ void S3DVegetationManager::_bind_methods()
 	ClassDB::bind_method(D_METHOD("tile_instance_counts", "tile_e", "tile_n"), &S3DVegetationManager::tile_instance_counts);
 	ClassDB::bind_method(D_METHOD("tile_stats", "tile_e", "tile_n"), &S3DVegetationManager::tile_stats);
 	ClassDB::bind_method(D_METHOD("pending_tile_count"), &S3DVegetationManager::pending_tile_count);
+	ClassDB::bind_method(D_METHOD("set_debug_keep_positions", "on"), &S3DVegetationManager::set_debug_keep_positions);
+	ClassDB::bind_method(D_METHOD("get_debug_keep_positions"), &S3DVegetationManager::get_debug_keep_positions);
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "debug_keep_positions"), "set_debug_keep_positions", "get_debug_keep_positions");
+	ClassDB::bind_method(D_METHOD("tile_tree_positions", "tile_e", "tile_n"), &S3DVegetationManager::tile_tree_positions);
 }
 
 void S3DVegetationManager::clear_loaded_tiles()
@@ -840,15 +1069,28 @@ void S3DVegetationManager::set_wind_speed_mps(double v)
 	}
 }
 Ref<Mesh> S3DVegetationManager::get_card_mesh() { prepare_card_assets(); return card_mesh; }
-Dictionary S3DVegetationManager::tile_stats(int tile_e, int tile_n) const
+// The square's tile state with trees (several groups may hold the square: a
+// forest file that stood down beside a surveyed tile), else the first one.
+const S3DVegetationManager::TileState *S3DVegetationManager::find_tile_state(int tile_e, int tile_n) const
 {
-	Dictionary out;
 	char want[64];
 	std::snprintf(want, sizeof(want), "%d_%d", tile_e, tile_n);
+	const TileState *first = nullptr;
 	for (const auto &kv : tiles) {
 		const auto colon = kv.first.find(':');
 		if (colon == std::string::npos || kv.first.substr(colon + 1) != want) continue;
-		const TileState &st = kv.second;
+		if (first == nullptr) first = &kv.second;
+		if (kv.second.node && kv.second.node->get_multimesh().is_valid() && kv.second.node->get_multimesh()->get_instance_count() > 0) return &kv.second;
+	}
+	return first;
+}
+
+Dictionary S3DVegetationManager::tile_stats(int tile_e, int tile_n) const
+{
+	Dictionary out;
+	const TileState *found = find_tile_state(tile_e, tile_n);
+	if (found) {
+		const TileState &st = *found;
 		out["near"] = st.node && st.node->get_multimesh().is_valid() ? st.node->get_multimesh()->get_instance_count() : 0;
 		out["far"] = st.far_node && st.far_node->get_multimesh().is_valid() ? st.far_node->get_multimesh()->get_instance_count() : 0;
 		PackedInt32Array sc;
@@ -862,13 +1104,32 @@ Dictionary S3DVegetationManager::tile_stats(int tile_e, int tile_n) const
 		out["high_total"] = st.high_total;
 		out["far_height_ratio"] = st.far_height_ratio;
 		out["snapped"] = st.snapped;
+		bool skipped_any = false;
+		for (const auto &kv : tiles) {
+			const auto colon = kv.first.find(':');
+			if (colon == std::string::npos) continue;
+			char want[64];
+			std::snprintf(want, sizeof(want), "%d_%d", tile_e, tile_n);
+			if (kv.first.substr(colon + 1) == want && kv.second.forest_fill_skipped) skipped_any = true;
+		}
+		out["forest_fill_skipped"] = skipped_any;   // any entry of the square (the forest file beside a surveyed tile)
 		out["low_mean_height"] = st.low_total > 0 ? st.low_height_sum / st.low_total : 0.0f;
 		out["alpine_mean_height"] = st.alpine_total > 0 ? st.alpine_height_sum / st.alpine_total : 0.0f;
 		out["alpine_total"] = st.alpine_total;
 		out["snap_pending"] = st.snap_pending;
 		out["ground_min"] = st.ground_min;
 		out["ground_max"] = st.ground_max;
-		return out;
+	}
+	return out;
+}
+
+PackedVector2Array S3DVegetationManager::tile_tree_positions(int tile_e, int tile_n) const
+{
+	PackedVector2Array out;
+	const TileState *found = find_tile_state(tile_e, tile_n);
+	if (found) {
+		const auto &pos = found->positions;
+		for (size_t i = 0; i + 1 < pos.size(); i += 2) out.push_back(Vector2(pos[i], pos[i + 1]));
 	}
 	return out;
 }
