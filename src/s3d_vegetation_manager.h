@@ -67,6 +67,8 @@ namespace s3d
 			float min_height = 0.0f, max_height = 0.0f;
 			int low_conifers = 0, high_conifers = 0;   // species picks below 700 m / above 1 300 m
 			int low_total = 0, high_total = 0;
+			int alpine_total = 0;                       // above 1 900 m
+			float low_height_sum = 0.0f, alpine_height_sum = 0.0f;
 			float far_height_ratio = 0.0f;
 			int snapped = 0;                 // trees placed on the terrain's height instead of the record's
 			float ground_min = 0.0f, ground_max = 0.0f;

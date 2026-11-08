@@ -381,6 +381,8 @@ MultiMeshInstance3D *S3DVegetationManager::make_instances(const LoadResult &resu
 		stats->min_height = 1e9f;
 		stats->max_height = 0.0f;
 		stats->low_conifers = stats->high_conifers = stats->low_total = stats->high_total = 0;
+		stats->alpine_total = 0;
+		stats->low_height_sum = stats->alpine_height_sum = 0.0f;
 		stats->snapped = 0;
 		stats->ground_min = 1e9f;
 		stats->ground_max = -1e9f;
@@ -424,11 +426,14 @@ MultiMeshInstance3D *S3DVegetationManager::make_instances(const LoadResult &resu
 		float scale_y, scale_xz;
 		if (card_mode) {
 			const int sp = pick_species(h, t.ground_z);
-			const Species &S = species[sp];
-			scale_y = t.height_m * j * (float)scale_mul;
-			// the card is one crown width wide: from the record's crown, else the species ratio
-			const float crown_w = t.crown_radius_m > 0.1f ? 2.0f * t.crown_radius_m : (float)(S.crown_ratio * t.height_m);
-			scale_xz = std::max(crown_w, 0.35f * t.height_m) * j * (float)scale_mul;
+			// Trees shrink towards the tree line: full height to 1 300 m, about
+			// half at 2 200 m (the records carry one 22 m distribution at every
+			// altitude; Swiss spruce stands at 1 900 m are 10-15 m).
+			const float alt_f = std::clamp(1.0f - (t.ground_z - 1300.0f) / 1000.0f * 0.55f, 0.45f, 1.0f);
+			scale_y = t.height_m * alt_f * j * (float)scale_mul;
+			// The atlas card is square and the species' crown width is already in
+			// the image (bake framing = max extent), so the card scales uniformly.
+			scale_xz = scale_y;
 			b = b.rotated(Vector3(0, 1, 0), t.yaw_rad);
 			b = b.scaled(Vector3(scale_xz, scale_y, scale_xz));
 			mm->set_instance_custom_data((int)k, Color((float)sp, (float)((h >> 8) & 0xFF) / 255.0f, (float)((h >> 20) & 0xFF) / 255.0f, 0.0f));
@@ -436,8 +441,10 @@ MultiMeshInstance3D *S3DVegetationManager::make_instances(const LoadResult &resu
 				stats->species_counts[sp]++;
 				stats->min_height = std::min(stats->min_height, scale_y);
 				stats->max_height = std::max(stats->max_height, scale_y);
-				if (t.ground_z < 700.0f) { stats->low_total++; if (S.conifer) stats->low_conifers++; }
+				const Species &S = species[sp];
+				if (t.ground_z < 700.0f) { stats->low_total++; stats->low_height_sum += scale_y; if (S.conifer) stats->low_conifers++; }
 				if (t.ground_z > 1300.0f) { stats->high_total++; if (S.conifer) stats->high_conifers++; }
+				if (t.ground_z > 1900.0f) { stats->alpine_total++; stats->alpine_height_sum += scale_y; }
 			}
 		} else {
 			scale_y = (float)(t.height_m * height_to_mesh_unit) * j;
@@ -816,6 +823,9 @@ Dictionary S3DVegetationManager::tile_stats(int tile_e, int tile_n) const
 		out["high_total"] = st.high_total;
 		out["far_height_ratio"] = st.far_height_ratio;
 		out["snapped"] = st.snapped;
+		out["low_mean_height"] = st.low_total > 0 ? st.low_height_sum / st.low_total : 0.0f;
+		out["alpine_mean_height"] = st.alpine_total > 0 ? st.alpine_height_sum / st.alpine_total : 0.0f;
+		out["alpine_total"] = st.alpine_total;
 		out["snap_pending"] = st.snap_pending;
 		out["ground_min"] = st.ground_min;
 		out["ground_max"] = st.ground_max;
