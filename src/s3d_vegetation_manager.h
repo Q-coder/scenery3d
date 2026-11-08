@@ -9,6 +9,8 @@
 #include <godot_cpp/classes/texture2d.hpp>
 #include <godot_cpp/classes/ref.hpp>
 
+#include "s3d_forest_file.h"
+
 #include <unordered_map>
 #include "s3d_frame.h"
 #include "s3d_exclusion.h"
@@ -48,17 +50,8 @@ namespace s3d
 		// corridors (centre line + half width) no tree may stand in. The
 		// corridors of every forest file of a square also thin the surveyed
 		// vegetation_*.bin trees of that square (roads clear inside forests).
-		struct Corridor {
-			std::vector<float> xz;   // dx, dz pairs along the centre line
-			float half_width = 3.0f;
-			float min_x = 0, min_z = 0, max_x = 0, max_z = 0;
-		};
-		struct ForestPolygon {
-			int kind = 2;            // 0 broadleaf, 1 conifer, 2 mixed
-			float density = 1.0f / 36.0f;   // trees per m2
-			float height_m = 20.0f;
-			std::vector<std::vector<float>> rings;   // outer first, then holes; dx, dz pairs
-		};
+		using Corridor = S3DForestCorridor;
+		using ForestPolygon = S3DForestPolygon;
 		static bool parse_forest_file(const std::string &path, std::vector<ForestPolygon> &polys, std::vector<Corridor> &corridors, double &tile_east, double &tile_north);
 		static void fill_polygons(const std::vector<ForestPolygon> &polys, uint32_t seed, std::vector<TreeInstance> &out);
 		static void apply_corridors(const std::vector<Corridor> &corridors, std::vector<TreeInstance> &trees);

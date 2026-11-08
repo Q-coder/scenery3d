@@ -3,6 +3,7 @@
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <algorithm>
 #include "s3d_tile.h"
+#include "s3d_forest_file.h"
 
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/classes/file_access.hpp>
@@ -173,6 +174,27 @@ std::vector<std::string> S3DTileManager::ortho_paths_for_tile(int ei, int ni, in
 		String p = orthophoto_paths[i];
 		if (p.is_empty()) continue;
 		out.push_back(std::string(p.utf8().get_data()) + suffix);
+	}
+	return out;
+}
+
+// Land-cover ground texture of a tile without an orthophoto, pixels per side
+// (8 m/px over a 1024 m square): a wood's edge is sharp enough under the tree
+// cards and the texture costs 48 KB. Far chunks paint 16 px per sub-tile like
+// the mip3 orthophotos.
+static constexpr int LANDCOVER_TILE_PX = 128;
+static constexpr int LANDCOVER_CHUNK_PX = 16;
+
+std::vector<std::string> S3DTileManager::landcover_paths_for_tile(int ei, int ni) const
+{
+	std::vector<std::string> out;
+	if (landcover_paths.is_empty()) return out;
+	const std::string fname = "/forest_" + std::to_string(ei * tile_size) + "_" + std::to_string(ni * tile_size) + ".bin";
+	out.reserve(landcover_paths.size());
+	for (int i = 0; i < landcover_paths.size(); i++) {
+		String p = landcover_paths[i];
+		if (p.is_empty()) continue;
+		out.push_back(std::string(p.utf8().get_data()) + fname);
 	}
 	return out;
 }
@@ -707,7 +729,7 @@ void S3DTileManager::worker_func()
 			}
 
 			// --- Read chunk ortho JPEG tiles (mip3, 16x16 each) ---
-			if (any_data && !req.ortho_mip_dirs.empty()) {
+			if (any_data && (!req.ortho_mip_dirs.empty() || !req.landcover_dirs.empty())) {
 				result.chunk_tile_count = csize;
 				for (int tdy = 0; tdy < csize; tdy++) {
 					for (int tdx = 0; tdx < csize; tdx++) {
@@ -770,7 +792,27 @@ void S3DTileManager::worker_func()
 							result.chunk_ortho_rgb[key] = std::move(raw);
 							continue;
 						}
-						if (jbuf.empty()) continue;
+						if (jbuf.empty()) {
+							// No orthophoto for this sub-tile: paint its
+							// land cover (forest polygons, or the plain
+							// base colour) wherever it has terrain, so the
+							// no-data fill below does not smear a neighbour's
+							// pixels across it (design §14.6).
+							if (req.landcover_dirs.empty()) continue;
+							auto cache_it = tile_cache.find(tile_key(tei, tni));
+							if (cache_it == tile_cache.end() || cache_it->second.data.empty()) continue;
+							std::vector<std::string> cands;
+							cands.reserve(req.landcover_dirs.size());
+							const std::string fbin = "/forest_" + std::to_string(lv95_e) + "_" + std::to_string(lv95_n) + ".bin";
+							for (const auto &dir : req.landcover_dirs) cands.push_back(dir + fbin);
+							LoadResult::RawRgb raw;
+							raw.w = LANDCOVER_CHUNK_PX;
+							if (!s3d_landcover_raster(cands, LANDCOVER_CHUNK_PX, (float)ts_m, raw.rgb)) {
+								s3d_fill_landcover_base(LANDCOVER_CHUNK_PX, raw.rgb);
+							}
+							result.chunk_ortho_rgb[key] = std::move(raw);
+							continue;
+						}
 						result.chunk_ortho_jpegs[key] = std::move(jbuf);
 					}
 				}
@@ -1001,11 +1043,14 @@ void S3DTileManager::worker_func()
 					PackedByteArray d = final_img->get_data();
 					const int64_t valid = ortho_fill_nodata(d, w, h);
 					if (valid * 10 < (int64_t)w * h) {
-						// < 10 % real pixels: outside every source.
-						result.success = false;
+						// < 10 % real pixels: outside every source. With
+						// land cover the tile is painted from its forest
+						// file below; without, it is dropped so the coarse
+						// globe shows instead of a white/black square.
 						result.jpeg_bytes.clear();
 						result.ortho_rgb.clear();
 						result.ortho_pixels = -1;
+						if (req.landcover_paths.empty()) result.success = false;
 					} else {
 						result.ortho_rgb.assign(d.ptr(), d.ptr() + d.size());
 						result.ortho_rgb_w = w;
@@ -1017,6 +1062,18 @@ void S3DTileManager::worker_func()
 					result.ortho_rgb.assign(cdata.ptr(), cdata.ptr() + cdata.size());
 					result.ortho_rgb_w = composite_img->get_width();
 					result.ortho_pixels = req.ortho_pixels;
+				}
+			}
+			// Land-cover fallback (design §14.6): no orthophoto covers the
+			// tile, so its forest polygons are painted into a small ground
+			// texture. A square without a forest file keeps the shared
+			// material, which is the same colour as the raster's base.
+			if (result.success && result.jpeg_bytes.empty() && result.ortho_rgb.empty() && !req.landcover_paths.empty()) {
+				std::vector<uint8_t> rgb;
+				if (s3d_landcover_raster(req.landcover_paths, LANDCOVER_TILE_PX, (float)req.tile_size, rgb)) {
+					result.ortho_rgb = std::move(rgb);
+					result.ortho_rgb_w = LANDCOVER_TILE_PX;
+					result.ortho_pixels = LANDCOVER_TILE_PX;
 				}
 			}
 		}
@@ -1489,6 +1546,11 @@ void S3DTileManager::_bind_methods()
 	ClassDB::bind_method(D_METHOD("get_orthophoto_paths"), &S3DTileManager::get_orthophoto_paths);
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_STRING_ARRAY, "orthophoto_paths"), "set_orthophoto_paths", "get_orthophoto_paths");
 
+	ClassDB::bind_method(D_METHOD("set_landcover_paths", "paths"), &S3DTileManager::set_landcover_paths);
+	ClassDB::bind_method(D_METHOD("get_landcover_paths"), &S3DTileManager::get_landcover_paths);
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_STRING_ARRAY, "landcover_paths"), "set_landcover_paths", "get_landcover_paths");
+	ClassDB::bind_method(D_METHOD("landcover_image", "path", "px"), &S3DTileManager::landcover_image);
+
 	ClassDB::bind_method(D_METHOD("set_skip_white_pixels", "skip"), &S3DTileManager::set_skip_white_pixels);
 	ClassDB::bind_method(D_METHOD("get_skip_white_pixels"), &S3DTileManager::get_skip_white_pixels);
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "skip_white_pixels"), "set_skip_white_pixels", "get_skip_white_pixels");
@@ -1584,6 +1646,7 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 				req.distance = dist;
 				req.ortho_paths = ortho_paths_for_tile(ei, ni, desired_lod);
 				req.ortho_pixels = req.ortho_paths.empty() ? -1 : ortho_texture_pixels_for_lod(desired_lod);
+				req.landcover_paths = landcover_paths_for_tile(ei, ni);
 				new_requests.push_back(std::move(req));
 			} else {
 				// Existing tile — update desired LOD.
@@ -1737,6 +1800,7 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 					req.distance = 0; // High priority for LOD upgrades.
 					req.ortho_paths = ortho_paths_for_tile(ei, ni, state.desired_lod);
 					req.ortho_pixels = req.ortho_paths.empty() ? -1 : ortho_texture_pixels_for_lod(state.desired_lod);
+					req.landcover_paths = landcover_paths_for_tile(ei, ni);
 					new_requests.push_back(std::move(req));
 				}
 			}
@@ -1942,6 +2006,11 @@ void S3DTileManager::update_tiles(Vector3 camera_pos)
 					String p = orthophoto_paths[i];
 					if (p.is_empty()) continue;
 					req.ortho_mip_dirs.push_back(std::string(p.utf8().get_data()) + "/mip3");
+				}
+				for (int i = 0; i < landcover_paths.size(); i++) {
+					String p = landcover_paths[i];
+					if (p.is_empty()) continue;
+					req.landcover_dirs.push_back(std::string(p.utf8().get_data()));
 				}
 				chunk_requests.push_back(std::move(req));
 			}
@@ -2336,6 +2405,28 @@ void S3DTileManager::set_orthophoto_paths(const PackedStringArray &p_paths)
 PackedStringArray S3DTileManager::get_orthophoto_paths() const
 {
 	return orthophoto_paths;
+}
+
+void S3DTileManager::set_landcover_paths(const PackedStringArray &p_paths)
+{
+	landcover_paths = p_paths;
+}
+
+PackedStringArray S3DTileManager::get_landcover_paths() const
+{
+	return landcover_paths;
+}
+
+Ref<Image> S3DTileManager::landcover_image(const String &p_path, int p_px) const
+{
+	if (p_px < 1 || p_px > 2048) return Ref<Image>();
+	std::vector<uint8_t> rgb;
+	std::vector<std::string> cands = { std::string(p_path.utf8().get_data()) };
+	if (!s3d_landcover_raster(cands, p_px, (float)tile_size, rgb)) return Ref<Image>();
+	PackedByteArray d;
+	d.resize((int64_t)rgb.size());
+	memcpy(d.ptrw(), rgb.data(), rgb.size());
+	return Image::create_from_data(p_px, p_px, false, Image::FORMAT_RGB8, d);
 }
 
 void S3DTileManager::set_skip_white_pixels(bool p_skip)

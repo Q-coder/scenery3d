@@ -38,6 +38,7 @@ namespace s3d
 		godot::PackedStringArray road_paths;
 		godot::String orthophoto_path;
 		godot::PackedStringArray orthophoto_paths;
+		godot::PackedStringArray landcover_paths;   // vegetation dirs: forest polygons painted where no orthophoto is
 		bool skip_white_pixels = true;
 
 		S3DTileManager *tile_manager = nullptr;
@@ -118,6 +119,8 @@ namespace s3d
 
 		void set_orthophoto_paths(const godot::PackedStringArray &p_paths);
 		godot::PackedStringArray get_orthophoto_paths() const;
+		void set_landcover_paths(const godot::PackedStringArray &p_paths);
+		godot::PackedStringArray get_landcover_paths() const;
 
 		void set_skip_white_pixels(bool p_skip);
 		bool get_skip_white_pixels() const;

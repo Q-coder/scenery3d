@@ -33,8 +33,6 @@ static constexpr uint32_t VEG_MAGIC = 0x31474556; // 'V','E','G','1' little-endi
 static constexpr uint32_t VEG_VERSION = 1;
 static constexpr size_t HEADER_SIZE = 32;
 static constexpr size_t RECORD_SIZE = 24;
-static constexpr uint32_t FOR_MAGIC = 0x31524F46; // 'F','O','R','1'
-static constexpr uint32_t FOR_VERSION = 1;
 
 // ── Constructor / Destructor ────────────────────────────────────────────────
 
@@ -389,72 +387,7 @@ void S3DVegetationManager::update_tiles(Vector3 camera_pos)
 // "ring": its centre line.
 bool S3DVegetationManager::parse_forest_file(const std::string &path, std::vector<ForestPolygon> &polys, std::vector<Corridor> &corridors, double &tile_east, double &tile_north)
 {
-	std::ifstream f(path, std::ios::binary | std::ios::ate);
-	if (!f.is_open()) return false;
-	const std::streamsize size = f.tellg();
-	f.seekg(0, std::ios::beg);
-	std::vector<uint8_t> buf((size_t)size);
-	f.read(reinterpret_cast<char *>(buf.data()), size);
-	if (buf.size() < 32 || s3d_read_u32(&buf[0]) != FOR_MAGIC || s3d_read_u32(&buf[4]) != FOR_VERSION) return false;
-	const uint32_t count = s3d_read_u32(&buf[8]);
-	tile_east = s3d_read_f64(&buf[16]);
-	tile_north = s3d_read_f64(&buf[24]);
-	size_t p = 32;
-	auto need = [&](size_t n) { return p + n <= buf.size(); };
-	for (uint32_t i = 0; i < count; i++) {
-		if (!need(16)) return false;
-		const int kind = buf[p];
-		const float density = s3d_read_f32(&buf[p + 4]);
-		const float height = s3d_read_f32(&buf[p + 8]);
-		const uint32_t rings = s3d_read_u32(&buf[p + 12]);
-		p += 16;
-		ForestPolygon poly;
-		poly.kind = kind;
-		poly.density = density;
-		poly.height_m = height > 1.0f ? height : 20.0f;
-		Corridor cor;
-		cor.half_width = density;
-		for (uint32_t r = 0; r < rings; r++) {
-			if (!need(4)) return false;
-			const uint32_t n = s3d_read_u32(&buf[p]);
-			p += 4;
-			if (!need((size_t)n * 8)) return false;
-			std::vector<float> ring;
-			ring.reserve((size_t)n * 2);
-			for (uint32_t k = 0; k < n; k++) {
-				ring.push_back(s3d_read_f32(&buf[p]));
-				ring.push_back(s3d_read_f32(&buf[p + 4]));
-				p += 8;
-			}
-			if (kind == 3) cor.xz = std::move(ring);
-			else poly.rings.push_back(std::move(ring));
-		}
-		if (kind == 3) {
-			if (cor.xz.size() >= 4) {
-				cor.min_x = cor.max_x = cor.xz[0];
-				cor.min_z = cor.max_z = cor.xz[1];
-				for (size_t k = 0; k + 1 < cor.xz.size(); k += 2) {
-					cor.min_x = std::min(cor.min_x, cor.xz[k]); cor.max_x = std::max(cor.max_x, cor.xz[k]);
-					cor.min_z = std::min(cor.min_z, cor.xz[k + 1]); cor.max_z = std::max(cor.max_z, cor.xz[k + 1]);
-				}
-				corridors.push_back(std::move(cor));
-			}
-		} else if (!poly.rings.empty() && poly.rings[0].size() >= 6) {
-			polys.push_back(std::move(poly));
-		}
-	}
-	return true;
-}
-
-static bool s3d_point_in_ring(const std::vector<float> &ring, float x, float z)
-{
-	bool inside = false;
-	const size_t n = ring.size() / 2;
-	for (size_t i = 0, j = n - 1; i < n; j = i++) {
-		const float xi = ring[2 * i], zi = ring[2 * i + 1], xj = ring[2 * j], zj = ring[2 * j + 1];
-		if (((zi > z) != (zj > z)) && (x < (xj - xi) * (z - zi) / (zj - zi + 1e-12f) + xi)) inside = !inside;
-	}
-	return inside;
+	return s3d_parse_forest_file(path, polys, corridors, tile_east, tile_north);
 }
 
 static inline uint32_t s3d_hash2(uint32_t a, uint32_t b)

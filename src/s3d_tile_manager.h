@@ -5,6 +5,7 @@
 #include <godot_cpp/classes/ref.hpp>
 #include <godot_cpp/classes/standard_material3d.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
+#include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/packed_string_array.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
@@ -83,6 +84,10 @@ namespace s3d
 			std::vector<std::string> ortho_paths;
 			// Target in-memory ortho texture size in pixels (-1 if no ortho).
 			int ortho_pixels = -1;
+			// Land-cover candidates (forest_E_N.bin per vegetation dir): the
+			// worker paints the first that parses into the tile texture when
+			// no orthophoto covers the tile (design §14.6).
+			std::vector<std::string> landcover_paths;
 
 			// Chunk fields (is_chunk == true).
 			bool is_chunk = false;
@@ -98,6 +103,10 @@ namespace s3d
 			// Orthophoto mip directories for chunk compositing
 			// (one per orthophoto root; first existing JPEG per sub-tile wins).
 			std::vector<std::string> ortho_mip_dirs;
+			// Vegetation dirs for the chunk's land-cover fallback: every
+			// sub-tile without a mip3 JPEG is painted from its forest file
+			// (base colour when it has none).
+			std::vector<std::string> landcover_dirs;
 		};
 
 		// Background file load result.
@@ -164,6 +173,12 @@ namespace s3d
 		// coexist seamlessly across the border.
 		godot::PackedStringArray orthophoto_paths;
 
+		// Ordered list of vegetation directories (forest_E_N.bin, FOR1).
+		// Where no orthophoto covers a tile the worker rasterises the
+		// square's forest polygons into a small ground texture, so woods
+		// stay recognisable past the tree cards, out to the far chunks.
+		godot::PackedStringArray landcover_paths;
+
 		// When true and 2+ orthophoto paths are configured, the worker
 		// decodes every candidate JPEG and composites them: pure white
 		// (255,255,255) pixels in higher-priority sources are filled in
@@ -175,6 +190,8 @@ namespace s3d
 		// Build the list of candidate ortho file paths (one per data root)
 		// for a given tile + LOD. Worker tries them in order.
 		std::vector<std::string> ortho_paths_for_tile(int ei, int ni, int lod) const;
+		// Candidate forest files (one per landcover path) for a tile.
+		std::vector<std::string> landcover_paths_for_tile(int ei, int ni) const;
 
 		// pixels_per_tile declared by <dir>/manifest.json, or 0 if the
 		// manifest is missing / has no such field (→ node-wide tile_px).
@@ -368,6 +385,12 @@ namespace s3d
 
 		void set_orthophoto_paths(const godot::PackedStringArray &p_paths);
 		godot::PackedStringArray get_orthophoto_paths() const;
+
+		void set_landcover_paths(const godot::PackedStringArray &p_paths);
+		godot::PackedStringArray get_landcover_paths() const;
+		// The land-cover raster of one forest file at px pixels (tests);
+		// an empty Ref when the file does not parse.
+		godot::Ref<godot::Image> landcover_image(const godot::String &p_path, int p_px) const;
 
 		void set_skip_white_pixels(bool p_skip);
 		bool get_skip_white_pixels() const;

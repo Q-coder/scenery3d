@@ -93,6 +93,10 @@ void Scenery3D::_bind_methods()
 	ClassDB::bind_method(D_METHOD("get_orthophoto_paths"), &Scenery3D::get_orthophoto_paths);
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_STRING_ARRAY, "orthophoto_paths"), "set_orthophoto_paths", "get_orthophoto_paths");
 
+	ClassDB::bind_method(D_METHOD("set_landcover_paths", "paths"), &Scenery3D::set_landcover_paths);
+	ClassDB::bind_method(D_METHOD("get_landcover_paths"), &Scenery3D::get_landcover_paths);
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_STRING_ARRAY, "landcover_paths"), "set_landcover_paths", "get_landcover_paths");
+
 	ClassDB::bind_method(D_METHOD("set_skip_white_pixels", "skip"), &Scenery3D::set_skip_white_pixels);
 	ClassDB::bind_method(D_METHOD("get_skip_white_pixels"), &Scenery3D::get_skip_white_pixels);
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "skip_white_pixels"), "set_skip_white_pixels", "get_skip_white_pixels");
@@ -144,6 +148,9 @@ void Scenery3D::_ready()
 			Variant ov = ps->get_setting("scenery3d/orthophoto_paths");
 			if (ov.get_type() == Variant::PACKED_STRING_ARRAY) orthophoto_paths = ov;
 		}
+	}
+	if (!landcover_paths.is_empty()) {
+		tile_manager->set_landcover_paths(landcover_paths);
 	}
 	if (!orthophoto_paths.is_empty()) {
 		tile_manager->set_orthophoto_paths(orthophoto_paths);
@@ -483,6 +490,19 @@ void Scenery3D::set_orthophoto_paths(const PackedStringArray &p_paths)
 PackedStringArray Scenery3D::get_orthophoto_paths() const
 {
 	return orthophoto_paths;
+}
+
+void Scenery3D::set_landcover_paths(const PackedStringArray &p_paths)
+{
+	landcover_paths = p_paths;
+	if (tile_manager) {
+		tile_manager->set_landcover_paths(p_paths);
+	}
+}
+
+PackedStringArray Scenery3D::get_landcover_paths() const
+{
+	return landcover_paths;
 }
 
 void Scenery3D::set_skip_white_pixels(bool p_skip)
