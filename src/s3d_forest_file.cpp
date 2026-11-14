@@ -138,6 +138,23 @@ static inline int lc_noise(uint32_t h, int amp)
 	return (int)(h % (uint32_t)(2 * amp + 1)) - amp;
 }
 
+// Smooth value noise in [0, 1]: hashed lattice of `cell` metres, smoothstep
+// interpolated, so patches have soft edges instead of blocks.
+static inline double lc_smooth(double wx, double wz, double cell, uint32_t salt)
+{
+	const double fx = wx / cell, fz = wz / cell;
+	const double ix = std::floor(fx), iz = std::floor(fz);
+	double tx = fx - ix, tz = fz - iz;
+	tx = tx * tx * (3.0 - 2.0 * tx);
+	tz = tz * tz * (3.0 - 2.0 * tz);
+	auto at = [&](int dx, int dz) {
+		return (double)(lc_hash(lc_hash((uint32_t)((int32_t)ix + dx), (uint32_t)((int32_t)iz + dz)), salt) & 0xFFFF) / 65535.0;
+	};
+	const double a = at(0, 0) + (at(1, 0) - at(0, 0)) * tx;
+	const double b = at(0, 1) + (at(1, 1) - at(0, 1)) * tx;
+	return a + (b - a) * tz;
+}
+
 // The orientation of a region's parcels and streets: one angle per block of
 // `cell` metres, so neighbouring squares share it.
 static inline void lc_rotate(double wx, double wz, double cell, uint32_t salt, double &u, double &v)
@@ -213,8 +230,9 @@ static void lc_kind_rgb(int kind, double wx, double wz, uint32_t h, uint8_t *o)
 			return;
 		}
 		case 6: {   // grass, meadow, scrub, parks
-			const int m = lc_noise(lc_hash_cell(wx, wz, 60.0, 6u), 10);
-			const int n = lc_noise(h, 6);
+			// soft mottling (blocks of one shade read as a checkerboard from above)
+			const int m = (int)((lc_smooth(wx, wz, 90.0, 6u) * 0.65 + lc_smooth(wx, wz, 28.0, 61u) * 0.35 - 0.5) * 26.0);
+			const int n = lc_noise(h, 4);
 			lc_set(o, 120 + m + n, 148 + m + n, 82 + m / 2 + n / 2);
 			return;
 		}
@@ -272,6 +290,25 @@ static void lc_kind_rgb(int kind, double wx, double wz, uint32_t h, uint8_t *o)
 			lc_set(o, 206 + n, 192 + n, 152 + n);
 			return;
 		}
+		case 12: {  // airfield: worn, mown grass between the runways (gery, ENGM 2026-11-14)
+			// Soft patches from 400 m down to 25 m blend a muted green
+			// into dry olive and into grey-brown worn ground; no parcels,
+			// no roofs. Faint mowing stripes in the block's orientation.
+			const double big = lc_smooth(wx, wz, 400.0, 121u);
+			const double mid = lc_smooth(wx, wz, 110.0, 122u);
+			const double fine = lc_smooth(wx, wz, 25.0, 123u);
+			const double dry = std::clamp((big * 0.5 + mid * 0.35 + fine * 0.15 - 0.38) * 2.6, 0.0, 1.0);
+			const double worn = std::clamp((mid * 0.6 + fine * 0.4 - 0.62) * 4.0, 0.0, 1.0) * big;
+			double r = 104.0 + (128.0 - 104.0) * dry, g = 128.0 + (130.0 - 128.0) * dry, b = 76.0 + (88.0 - 76.0) * dry;
+			r += (124.0 - r) * worn; g += (118.0 - g) * worn; b += (102.0 - b) * worn;
+			double u, v;
+			lc_rotate(wx, wz, 4096.0, 12u, u, v);
+			const double st = v / 24.0 - std::floor(v / 24.0);
+			const int stripe = st < 0.5 ? 2 : -2;
+			const int n = lc_noise(h, 4);
+			lc_set(o, (int)r + n + stripe, (int)g + n + stripe, (int)b + n / 2 + stripe);
+			return;
+		}
 		default:
 			lc_set(o, S3D_LANDCOVER_BASE_RGB[0], S3D_LANDCOVER_BASE_RGB[1], S3D_LANDCOVER_BASE_RGB[2]);
 			return;
@@ -282,10 +319,11 @@ static void lc_kind_rgb(int kind, double wx, double wz, uint32_t h, uint8_t *o)
 static int lc_rank(int kind)
 {
 	switch (kind) {
-		case 5: return 0; case 6: return 1; case 7: return 2; case 8: return 3;
-		case 9: return 4; case 10: return 5; case 11: return 6;
-		case 0: case 1: case 2: return 7;
-		case 4: return 8;
+		case 12: return 0;   // the aerodrome boundary: everything mapped inside it paints over
+		case 5: return 1; case 6: return 2; case 7: return 3; case 8: return 4;
+		case 9: return 5; case 10: return 6; case 11: return 7;
+		case 0: case 1: case 2: return 8;
+		case 4: return 9;
 		default: return -1;
 	}
 }

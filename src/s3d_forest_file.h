@@ -9,7 +9,7 @@
 // File (little-endian): "FOR1", u32 1, u32 polygon count, u32 0, f64 tile
 // east, f64 tile north (SW corner, LV95-like metres); polygon: u8 kind
 // (0 broadleaf, 1 conifer, 2 mixed, 3 corridor, 4 water, 5 farmland, 6 grass,
-// 7 built-up, 8 industrial, 9 bare rock, 10 glacier, 11 sand), u8[3], f32
+// 7 built-up, 8 industrial, 9 bare rock, 10 glacier, 11 sand, 12 airfield), u8[3], f32
 // density (trees per m2; corridor: half width m; land cover 0), f32 height m,
 // u32 ring count; ring: u32 n, n x (f32 dx east, f32 dz north) from the SW
 // corner. Only kinds 0-2 get trees.
@@ -25,7 +25,7 @@ struct S3DForestCorridor {
 };
 
 struct S3DForestPolygon {
-	int kind = 2;            // 0 broadleaf, 1 conifer, 2 mixed; land cover 4 water, 5 farmland, 6 grass, 7 built-up, 8 industrial, 9 rock, 10 glacier, 11 sand
+	int kind = 2;            // 0 broadleaf, 1 conifer, 2 mixed; land cover 4 water, 5 farmland, 6 grass, 7 built-up, 8 industrial, 9 rock, 10 glacier, 11 sand, 12 airfield
 	float density = 1.0f / 36.0f;   // trees per m2
 	float height_m = 20.0f;
 	std::vector<std::vector<float>> rings;   // outer first, then holes; dx, dz pairs
