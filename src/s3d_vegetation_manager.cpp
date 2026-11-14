@@ -472,9 +472,9 @@ void S3DVegetationManager::apply_corridors(const std::vector<Corridor> &corridor
 }
 
 // ── Card mode assets ────────────────────────────────────────────────────────
-// Three vertical quads at 60 deg and one canopy quad: unit height (base at
-// y = 0), unit crown width. UV = card space (v = 0 at the top of the card),
-// COLOR.r = 1 on the canopy quad. The shader picks the species column.
+// Three vertical quads at 60 deg: unit height (base at y = 0), unit crown
+// width. UV = card space (v = 0 at the top of the card). The shader picks the
+// species column.
 void S3DVegetationManager::prepare_card_assets()
 {
 	if (card_assets_ready) return;
@@ -501,8 +501,9 @@ void S3DVegetationManager::prepare_card_assets()
 		const Vector3 d(0.5 * std::cos(a), 0.0, 0.5 * std::sin(a));
 		quad(-d, d, d + Vector3(0, 1, 0), -d + Vector3(0, 1, 0), 0.0f);
 	}
-	const float cy = 0.72f;
-	quad(Vector3(-0.5f, cy, -0.5f), Vector3(0.5f, cy, -0.5f), Vector3(0.5f, cy, 0.5f), Vector3(-0.5f, cy, 0.5f), 1.0f);
+	// No canopy quad (gery 2026-11-14): the top-down card fading in on a steep
+	// view read as trees popping up while flying over a forest. The shader
+	// keeps its COLOR.r branch for a mesh that has one.
 	Array arrays;
 	arrays.resize(Mesh::ARRAY_MAX);
 	arrays[Mesh::ARRAY_VERTEX] = verts;
