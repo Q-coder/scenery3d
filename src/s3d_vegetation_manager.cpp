@@ -497,7 +497,7 @@ void S3DVegetationManager::prepare_card_assets()
 		for (int i = 0; i < 6; i++) idx.push_back(base + order[i]);
 	};
 	for (int k = 0; k < 3; k++) {
-		const double a = k * (M_PI / 3.0);
+		const double a = k * (3.14159265358979323846 / 3.0); // not M_PI: MSVC <cmath> lacks it without _USE_MATH_DEFINES
 		const Vector3 d(0.5 * std::cos(a), 0.0, 0.5 * std::sin(a));
 		quad(-d, d, d + Vector3(0, 1, 0), -d + Vector3(0, 1, 0), 0.0f);
 	}
