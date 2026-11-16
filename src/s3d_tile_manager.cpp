@@ -1,4 +1,5 @@
 #include "s3d_tile_manager.h"
+#include "s3d_shaders.h"
 #include <godot_cpp/variant/packed_vector2_array.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <algorithm>
@@ -2423,9 +2424,7 @@ PackedStringArray S3DTileManager::get_landcover_paths() const
 Ref<Material> S3DTileManager::make_chunk_material(int cg_ei, int cg_ni, Ref<Texture2D> p_tex)
 {
 	if (chunk_shader.is_null()) {
-		ResourceLoader *rl = ResourceLoader::get_singleton();
-		const String path = "res://addons/scenery3d/shaders/chunk.gdshader";
-		if (rl && rl->exists(path)) chunk_shader = rl->load(path);
+		chunk_shader = S3DShaders::load("chunk");
 	}
 	if (chunk_shader.is_null()) {
 		// No shader (headless without the addon files): the old materials.

@@ -1,4 +1,5 @@
 #include "s3d_road_manager.h"
+#include "s3d_shaders.h"
 
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/classes/viewport.hpp>
@@ -774,7 +775,7 @@ Ref<Material> S3DRoadManager::material_for_group(size_t gi)
 {
 	if (gi < manifests.size() && manifests[gi].shader == "roads") {
 		if (roads_shader_material.is_null()) {
-			Ref<Shader> sh = ResourceLoader::get_singleton()->load("res://addons/scenery3d/shaders/roads.gdshader");
+			Ref<Shader> sh = S3DShaders::load("roads");
 			if (sh.is_valid()) {
 				roads_shader_material.instantiate();
 				roads_shader_material->set_shader(sh);

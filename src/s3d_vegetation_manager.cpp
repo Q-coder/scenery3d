@@ -1,4 +1,5 @@
 #include "s3d_vegetation_manager.h"
+#include "s3d_shaders.h"
 
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/classes/viewport.hpp>
@@ -542,7 +543,7 @@ void S3DVegetationManager::prepare_card_assets()
 		UtilityFunctions::push_warning("S3DVegetationManager: no species in ", atlas_meta_path, "; one generic column");
 		species.push_back(Species());
 	}
-	Ref<Shader> sh = ResourceLoader::get_singleton()->load("res://addons/scenery3d/shaders/tree.gdshader");
+	Ref<Shader> sh = S3DShaders::load("tree");
 	Ref<Texture2D> tex;
 	if (ResourceLoader::get_singleton()->exists(atlas_path)) {
 		tex = ResourceLoader::get_singleton()->load(atlas_path);

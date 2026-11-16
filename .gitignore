@@ -19,3 +19,4 @@ godot-cpp/gen/
 
 # Godot
 .godot/
+src/s3d_shaders_gen.h

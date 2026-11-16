@@ -11,6 +11,7 @@
 #include "s3d_water_manager.h"
 #include "s3d_road_manager.h"
 #include "s3d_vegetation_manager.h"
+#include "s3d_shaders.h"
 
 using namespace godot;
 
@@ -29,6 +30,7 @@ void initialize_scenery3d_module(godot::ModuleInitializationLevel p_level)
 	ClassDB::register_class<s3d::S3DWaterManager>();
 	ClassDB::register_class<s3d::S3DRoadManager>();
 	ClassDB::register_class<s3d::S3DVegetationManager>();
+	ClassDB::register_class<s3d::S3DShaders>();
 }
 
 void uninitialize_scenery3d_module(godot::ModuleInitializationLevel p_level)
